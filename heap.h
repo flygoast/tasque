@@ -1,15 +1,15 @@
 #ifndef __HEAP_H_INCLUDED__
 #define __HEAP_H_INCLUDED__
 
-typedef int (*cmp_func)(void *, void *);
-typedef void (*record_func)(void *, int);
+typedef int (*cmp_fn)(void *, void *);
+typedef void (*record_fn)(void *, int);
 
 typedef struct heap_st {
     int         cap;
     int         len;
     void        **data;
-    cmp_func    less;
-    record_func record;
+    cmp_fn      less;
+    record_fn   record;
 } heap_t;
 
 heap_t *heap_create(void);
