@@ -72,3 +72,7 @@ tube_t *tube_find(const char *name) {
     }
     return NULL;
 }
+
+int tube_has_buried_job(tube_t *t) {
+    return dlist_length(t->buried_jobs) != 0;
+}

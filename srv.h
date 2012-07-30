@@ -30,9 +30,10 @@ typedef struct server_st {
     hash_t      hash;
     int         ready_cnt;
 
+    stats_t     global_stat;
     uint64_t    op_cnt[TOTAL_OPS];
     uint64_t    timeout_cnt;
-    conn_t      *dirty;
+    dlist       dirty_conns;
 } server_t;
 
 extern server_t tasque_srv;

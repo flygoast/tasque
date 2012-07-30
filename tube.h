@@ -41,5 +41,6 @@ static void tube_free(tube_t *t);
 void tube_dref(tube_t *t);
 void tube_iref(tube_t *t);
 tube_t *tube_find(const char *name);
+int tube_has_buried_job(tube_t *t);
 
 #endif /* __TUBE_H_INCLUDED__ */

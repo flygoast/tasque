@@ -83,7 +83,7 @@ void srv_serve() {
     if (tasque_srv.user) srv_su(tasque_srv.user);
 
     /* 10 ms */
-    if (event_init(&tasque_srv.evt, conn_cron, &tasque_srv, 10) != 0) {
+    if (event_init(&tasque_srv.evt, conn_tick, &tasque_srv, 10) != 0) {
         fprintf(stderr, "event_init failed\n");
         exit(1);
     }

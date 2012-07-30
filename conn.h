@@ -53,7 +53,7 @@ struct conn_st {
 
 int conn_less(void *conn_a, void *conn_b);
 int conn_record(void *conn, int pos);
-void conn_cron(void *tickarg, int ev);
+void conn_tick(void *tickarg, int ev);
 void conn_close(conn_t *c);
 void conn_set_producer(conn_t *c);
 void conn_set_worker(conn_t *c);
