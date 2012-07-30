@@ -1,6 +1,12 @@
 #ifndef __EVENT_H_INCLUDED__
 #define __EVENT_H_INCLUDED__
 
+#define EVENT_DEL       0
+#define EVENT_RD        1
+#define EVENT_WR        2
+#define EVENT_TICK      3
+#define EVENT_HUP       4
+
 typedef void (*handle_fn)(void *arg, int event);
 
 typedef struct event_entry_st {
@@ -18,12 +24,6 @@ typedef struct event_st {
     int         interval;
     int         stop;
 } event_t;
-
-#define EVENT_DEL       0
-#define EVENT_RD        1
-#define EVENT_WR        2
-#define EVENT_TICK      3
-#define EVENT_HUP       4
 
 event_t *event_create(handle_fn tick, void *tickval, int interval);
 int event_init(event_t *evt, handle_fn tick, void *tickval, int interval);

@@ -1,0 +1,45 @@
+#ifndef __TUBE_H_INCLUDED__
+#define __TUBE_H_INCLUDED__
+#include <stdint.h>
+#include "srv.h"
+#include "dlist.h"
+#include "dqueue.h"
+#include "heap.h"
+#include "tube.h"
+
+#define MAX_TUBE_NAME_LEN       256
+
+#define TUBE_ASSIGN(a, b)   (tube_dref(a), (a) = (b), tube_iref(a))
+
+typedef struct stats_st {
+    uint32_t        urgent_cnt;
+    uint32_t        waiting_cnt;
+    uint32_t        buried_cnt;
+    uint32_t        reserved_cnt;
+    uint32_t        pause_cnt;
+    uint64_t        total_delete_cnt;
+    uint64_t        total_jobs_cnt;
+} stats_t;
+
+typedef struct tube_st {
+    uint32_t        refs;
+    char            name[MAX_TUBE_NAME_LEN];
+    heap_t          ready_jobs;
+    heap_t          delay_jobs;
+    dlist           buried_jobs;
+    dqueue_t        waiting_conns;    /* queue of conns */
+    uint32_t        using_cnt;
+    uint32_t        watching_cnt;
+    int64_t         pause;
+    int64_t         deadline_at;
+    stats_t         stats;
+} tube_t;
+
+
+tube_t *tube_create(const char *name);
+static void tube_free(tube_t *t);
+void tube_dref(tube_t *t);
+void tube_iref(tube_t *t);
+tube_t *tube_find(const char *name);
+
+#endif /* __TUBE_H_INCLUDED__ */
