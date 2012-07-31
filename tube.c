@@ -1,9 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "job.h"
 #include "srv.h"
 #include "dlist.h"
-#include "dqueue.h"
 #include "heap.h"
 #include "tube.h"
 
@@ -26,26 +26,26 @@ tube_t *tube_create(const char *name) {
         free(t);
         return NULL;
     }
-
     t->delay_jobs.less = job_delay_less;
     t->delay_jobs.record = job_set_heap_pos;
     dlist_init(&t->buried_jobs);
-    dqueue_init(&t->waiting_conns)
+    set_init(&t->waiting_conns, NULL, NULL);
     return t;
 }
 
 static void tube_free(tube_t *t) {
+    /* XXX */
     heap_destroy(&t->ready_jobs);    
     heap_destroy(&t->delay_jobs);
     dlist_destroy(&t->buried_jobs);
-    /* TODO: destory queue */
+    set_destroy(&t->waiting_conns);
     free(t);
 }
 
 void tube_dref(tube_t *t) {
     assert(t);
     if (t->refs < 1) {
-        fprintf(stderr, "refs is zero for tube: %s\n", t-name);
+        fprintf(stderr, "refs is zero for tube: %s\n", t->name);
         return;
     }
 
@@ -64,9 +64,9 @@ tube_t *tube_find(const char *name) {
     tube_t *t;
     size_t i;
 
-    for (i = 0; i < tasque_srv.tubes.count; ++i) {
-        t = vector_get_at(&tasque_srv.tubes, i);
-        if (strncmp(t->name, name, MAX_TUBE_NAME_LEN) == 0)  {
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        if (strncmp(t->name, name, MAX_TUBE_NAME_LEN) == 0) {
             return t;
         }
     }
@@ -74,5 +74,5 @@ tube_t *tube_find(const char *name) {
 }
 
 int tube_has_buried_job(tube_t *t) {
-    return dlist_length(t->buried_jobs) != 0;
+    return dlist_length(&t->buried_jobs) != 0;
 }

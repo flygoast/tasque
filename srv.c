@@ -1,14 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <pwd.h>
 #include <sys/types.h>
 #include "srv.h"
+#include "conn.h"
+#include "tube.h"
 
 #define DEFAULT_PORT        8774
 #define INIT_TUBE_NUM       8
 #define INIT_HASH_NUM       128
 
+/* global server configure and storage */
 server_t tasque_srv;
 
 static void srv_su(const char *user) {
@@ -48,18 +52,15 @@ void srv_init() {
     tasque_srv.host = strdup("0.0.0.0");
     tasque_srv.user = NULL;
 
-    if (vector_init(&tasque_srv.tubes, INIT_TUBE_NUM, 
-            sizeof(tube_t*)) != 0) {
-        fprintf(stderr, "vector_init failed\n");
-        exit(1);
-    }
+    set_init(&tasque_srv.tubes, NULL, NULL);
 
     t = tube_create("default");
     if (!t) {
         fprintf(stderr, "tube_create default failed\n");
         exit(1);
     }
-    vector_push(&tasque_srv.tubes, t);
+    set_append(&tasque_srv.tubes, t);
+    /* XXX */
     tasque_srv.default_tube = t;
 
     if (heap_init(&tasque_srv.conns) != 0) {
@@ -71,7 +72,6 @@ void srv_init() {
         fprintf(stderr, "hash_init failed\n");
         exit(1);
     }
-
 }
 
 void srv_serve() {
@@ -114,6 +114,6 @@ void srv_destroy() {
 
     event_destroy(&tasque_srv.evt);
     heap_destroy(&tasque_srv.conns);
-    vector_destroy(&tasque_srv.tubes);
+    set_destroy(&tasque_srv.tubes);
     hash_destroy(&tasque_srv.hash);
 }

@@ -1,9 +1,9 @@
 #ifndef __TUBE_H_INCLUDED__
 #define __TUBE_H_INCLUDED__
+
 #include <stdint.h>
-#include "srv.h"
 #include "dlist.h"
-#include "dqueue.h"
+#include "set.h"
 #include "heap.h"
 #include "tube.h"
 
@@ -27,7 +27,7 @@ typedef struct tube_st {
     heap_t          ready_jobs;
     heap_t          delay_jobs;
     dlist           buried_jobs;
-    dqueue_t        waiting_conns;    /* queue of conns */
+    set_t           waiting_conns;    /* set of conns */
     uint32_t        using_cnt;
     uint32_t        watching_cnt;
     int64_t         pause;
@@ -37,6 +37,7 @@ typedef struct tube_st {
 
 
 tube_t *tube_create(const char *name);
+/* XXX */
 static void tube_free(tube_t *t);
 void tube_dref(tube_t *t);
 void tube_iref(tube_t *t);

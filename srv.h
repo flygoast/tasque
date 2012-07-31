@@ -1,12 +1,13 @@
 #ifndef __SRV_H_INCLUDED__
 #define __SRV_H_INCLUDED__
 
-#include "prot.h"
+#include <stdint.h>
+#include "tube.h"
 #include "conn.h"
 #include "heap.h"
 #include "event.h"
 #include "hash.h"
-#include "vector.h"
+#include "set.h"
 
 typedef struct server_st {
     int         port;
@@ -15,7 +16,7 @@ typedef struct server_st {
     evtent_t    sock;
     event_t     evt;
     heap_t      conns;
-    vector_t    tubes;
+    set_t       tubes;
     tube_t      *default_tube;
     int         verbose;
     int         drain_mode;

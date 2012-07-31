@@ -1,18 +1,25 @@
+#include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
-#include <erron.h>
+#include <errno.h>
 #include <assert.h>
 #include <limits.h>
+#include <unistd.h>
+#include <inttypes.h>
+#include "srv.h"
+#include "conn.h"
 #include "times.h"
 #include "dlist.h"
 #include "event.h"
 #include "tube.h"
 #include "job.h"
-#include "srv.h"
+#include "net.h"
 
 #define INIT_WATCH_NUM  8
 #define min(a, b)       ((a) < (b) ? (a) : (b))
 
+#define SAFETY_MARGIN           1000000         /* 1 second */
 
 /* job body cannot beyond this limit of length */
 #define JOB_DATA_LIMIT     (1 << 16 - 1)
@@ -247,13 +254,13 @@ static const char *op_names[] = {
 };
 
 static int conn_has_reserved_job(conn_t *c) {
-    return dlist_length(c->reserverd_jobs) != 0;
+    return dlist_length(&c->reserved_jobs) != 0;
 }
 
 static void reply(conn_t *c, char *line, int len, int state) {
     if (!c) return;
 
-    event_regis(&tasque_srv.evt, c, EVENT_WR);
+    event_regis(&tasque_srv.evt, &c->sock, EVENT_WR);
     if (!dlist_add_node_head(&tasque_srv.dirty_conns, c)) {
         conn_close(c);
         return;
@@ -279,7 +286,7 @@ void conn_rm_dirty(conn_t *c) {
 
 #define reply_msg(c, m) reply((c), (m), CONSTSTRLEN(m),STATE_SENDWORD)
 
-static reply_line(conn_t *c, int state, const char *fmt, ...) {
+static void reply_line(conn_t *c, int state, const char *fmt, ...) {
     int ret;
     va_list ap;
     va_start(ap, fmt);
@@ -296,7 +303,7 @@ static void reply_job(conn_t *c, job_t *j, const char *word) {
     /* tell this connection which job to send */
     c->out_job = j;
     c->out_job_sent = 0;
-    return reply_line(c, STATE_SENDJOB, "%s %"PRIu64" %u\r\n",
+    return reply_line(c, STATE_SENDJOB, "%s %" PRIu64 " %u\r\n",
             word, j->rec.id, j->rec.body_size - 2);
 }
 
@@ -307,15 +314,15 @@ conn_t *conn_remove_waiting(conn_t *c) {
     if (!conn_waiting(c)) return NULL;
 
     c->type &= ~CONN_TYPE_WAITING;
-    --&tasque_srv.global_stat.waiting_cnt;
+    --tasque_srv.global_stat.waiting_cnt;
 
-    for (i = 0; i < c->count; ++i) {
-        t = (tube_t *)vector_get_at(&tasque_srv.watch, i);
-        --t->stat.waiting_cnt;
-        vector_
+    for (i = 0; i < c->watch.used; ++i) {
+        t = (tube_t *)c->watch.items[i];
+        --t->stats.waiting_cnt;
+        set_remove(&t->waiting_conns, c);
     }
-
 }
+
 static int64_t conn_tickat(conn_t *c) {
     int margin = 0, should_timeout = 0;
     int64_t t = INT64_MAX;
@@ -325,7 +332,7 @@ static int64_t conn_tickat(conn_t *c) {
     }
 
     if (conn_has_reserved_job(c)) {
-        t = conn_sonnest_job(c)->rec.deadline_at - ustime() - margin;
+        t = conn_soonest_job(c)->rec.deadline_at - ustime() - margin;
         should_timeout = 1;
     }
 
@@ -346,7 +353,7 @@ job_t *conn_soonest_job(conn_t *c) {
     if (!soonest) {
         dlist_iter iter;
         dlist_node *node;
-        dlist_rewind(c->reserved_jobs, &iter);
+        dlist_rewind(&c->reserved_jobs, &iter);
 
         while ((node = dlist_next(&iter))) {
             j = (job_t *)node->value;
@@ -364,7 +371,7 @@ int conn_less(void *conn_a, void *conn_b) {
 }
 
 int conn_record(void *conn, int pos) {
-    ((conn_t *)conn)->tickpos = i;
+    ((conn_t *)conn)->tickpos = pos;
 }
 
 conn_t *conn_create(int fd, char start_state, tube_t *use,
@@ -407,23 +414,25 @@ void conn_set_producer(conn_t *c) {
 
 void conn_set_worker(conn_t *c) {
     if (c->type & CONN_TYPE_WORKER) return;
-    c-type |= CONN_TYPE_WORKER;
+    c->type |= CONN_TYPE_WORKER;
     ++tasque_srv.cur_worker_cnt;    /* stats */
 }
 
 int conn_deadline_soon(conn_t *c) {
     int64_t t = ustime();
-    job_t *j = conn_sonnest_job(c);
+    job_t *j = conn_soonest_job(c);
     return j && t >= j->rec.deadline_at - SAFETY_MARGIN;
 }
 
 int conn_ready(conn_t *c) {
     size_t  i;
+    /*
     for (i = 0; i < c->watch.slots; ++i) {
         if ((tube_t*)vector_get_at(i)->ready_jobs.len) {
             return 1;
         }
     }
+    */
     return 0;
 }
 
@@ -434,7 +443,7 @@ void conn_close(conn_t *c) {
         printf("close %d\n", c->sock.fd);
     }
 
-    if (c->sockfd >= 0) {
+    if (c->sock.fd >= 0) {
         close(c->sock.fd);
         c->sock.fd = -1;
     }
@@ -463,39 +472,53 @@ static int cmd_len(conn_t *c) {
     return scan_eol(c->cmd, c->cmd_read);
 }
 
-static void read_from_client(void *arg, int ev) {
-    conn_t *conn = (conn_t *)arg;
+static void handle_client(void *arg, int ev) {
+    conn_t *c = (conn_t *)arg;
     int r, to_read;
-    job_t *j;
-
-    switch (c->state) {
-    case STATE_WANTCOMMAND:
-        r = read(c->sock.fd, c->cmd + c->cmd_read, 
-                LINE_BUF_SIZE - c->cmd_read);
-        if (r < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK ||
-                    errno = EINTR) {
-                return;
-            }
-            conn_close(c);
+    //job_t *j;
+    r = read(c->sock.fd, c->cmd + c->cmd_read, 
+            LINE_BUF_SIZE - c->cmd_read);
+    if (r < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                errno == EINTR) {
+            return;
         }
-
-        if (r == 0) return conn_close(c);   /* client close connection */
-        c->cmd_read += r;
-
-        c->cmd_len = cmd_len(c); 
-        /* when c->cmd_len > 0, we have a complete command */
-        if (c->cmd_len) return do_cmd(c);
-        if (c->cmd_read == LINE_BUF_SIZE) {
-            c->cmd_read = 0;    /* discard the input so far */
-            return reply_msg(c, MSG_BAD_FORMAT);
-        }
-
-        /* otherwise we have an incomplete line, so just keep waiting */
-        break;
-    case STATE_BITBUCKET:
-        /* XXX */
+        conn_close(c);
     }
+
+
+    if (r == 0) return conn_close(c);
+    return reply_msg(c, MSG_BAD_FORMAT);
+
+
+//    switch (c->state) {
+//    case STATE_WANTCOMMAND:
+//        r = read(c->sock.fd, c->cmd + c->cmd_read, 
+//                LINE_BUF_SIZE - c->cmd_read);
+//        if (r < 0) {
+//            if (errno == EAGAIN || errno == EWOULDBLOCK ||
+//                    errno = EINTR) {
+//                return;
+//            }
+//            conn_close(c);
+//        }
+//
+//        if (r == 0) return conn_close(c);   /* client close connection */
+//        c->cmd_read += r;
+//
+//        c->cmd_len = cmd_len(c); 
+//        /* when c->cmd_len > 0, we have a complete command */
+//        if (c->cmd_len) return do_cmd(c);
+//        if (c->cmd_read == LINE_BUF_SIZE) {
+//            c->cmd_read = 0;    /* discard the input so far */
+//            return reply_msg(c, MSG_BAD_FORMAT);
+//        }
+//
+//        /* otherwise we have an incomplete line, so just keep waiting */
+//        break;
+//    case STATE_BITBUCKET:
+//        /* XXX */
+//    }
 }
 
 void conn_accept(const int fd, const short which, void *arg) {
@@ -537,7 +560,7 @@ void conn_accept(const int fd, const short which, void *arg) {
         return;
     }
     c->sock.x = c;
-    c->sock.f = (handle_fn)read_from_client;
+    c->sock.f = (handle_fn)handle_client;
     c->sock.fd = cli_fd;
 
     ret = event_regis(&tasque_srv.evt, &c->sock, EVENT_RD);

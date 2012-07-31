@@ -14,6 +14,8 @@
 #define conn_waiting(c)     ((c)->type & CONN_TYPE_WAITING)
 #define INET4_IP_LEN        16
 
+#define TOTAL_OPS               24
+
 typedef struct conn_st conn_t;
 
 struct conn_st {
@@ -26,7 +28,7 @@ struct conn_st {
     tube_t      *use;
     int64_t     tickat;         /* time at which to do more work */
     int         tickpos;        /* position in srv->conns */
-    job_t       soonest_job;    /* memorization of the soonest job */
+    job_t       *soonest_job;    /* memorization of the soonest job */
     int         ev;             /* event type: EVENT_RD|WR|HUP */
     int         pending_timeout;    /* seconds */
 
@@ -47,7 +49,7 @@ struct conn_st {
     job_t       *in_job;    /* a job to be read from the client */
     job_t       *out_job;
     int         out_job_sent;
-    vector_t    watch;
+    set_t       watch;
     dlist       reserved_jobs;
 };
 
@@ -57,7 +59,7 @@ void conn_tick(void *tickarg, int ev);
 void conn_close(conn_t *c);
 void conn_set_producer(conn_t *c);
 void conn_set_worker(conn_t *c);
-job_t conn_soonest_job(conn_t *c);
+job_t *conn_soonest_job(conn_t *c);
 int conn_deadline_soon(conn_t *c);
 int conn_ready(conn_t *c);
 
