@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <netinet/in.h>
 #include "srv.h"
 #include "conn.h"
 #include "times.h"
@@ -400,7 +401,6 @@ void conn_record(void *conn, int pos) {
 
 conn_t *conn_create(int fd, char start_state, tube_t *use,
         tube_t *watch) {
-    //job_t *j;
     conn_t *c = (conn_t *)calloc(1, sizeof(*c));
 
     set_init(&c->watch, (set_event_fn)on_watch, (set_event_fn)on_ignore);
@@ -490,81 +490,184 @@ static int cmd_len(conn_t *c) {
     return scan_eol(c->cmd, c->cmd_read);
 }
 
+/* Read a priority value from the given buffer and place it in pri.
+ * Update `end' to point to the address after the last character
+ * consumed. `pri' and `end' can be NULL. If they are both NULL,
+ * read_pri() will do the conversion and return the status code 
+ * but not update any values. This is an easy way to check for 
+ * errors.
+ *
+ * If `end' is NULL, read_pri() will also check that the entire 
+ * input string was consumed and return an error code otherwise.
+ *
+ * Return 0 on success, or nonzero on failure.
+ *
+ * If a failure occured, `pri' and `end' are not modified. */
+static int read_pri(uint32_t *pri, const char *buf, char **end) {
+    char *tend;
+    uint32_t tpri;
+
+    while (buf[0] == ' ') ++buf;
+    if (!isdigit(buf[0])) return -1;
+    tpri = strtoul(buf, &tend, 10);
+    if (tend == buf) return -1;
+    if (errno && errno != ERANGE) return -1;
+    if (!end && tend[0] != '\0') return -1;
+
+    if (pri) *pri = tpri;
+    if (end) *end = tend;
+
+    return 0;
+}
+
+/* Read a delay value from the given buffer and place it in `delay'.
+ * The interface and behavior are analogous to read_pri(). */
+static int read_delay(int64_t *delay, const char *buf, char **end) {
+    int ret;
+    uint32_t delay_sec;
+
+    ret = read_pri(&delay_sec, buf, end);
+    if (ret) return ret; /* some error */
+    *delay = ((int64_t)dealy_sec) * 1000000;
+    return 0;
+}
+    
+/* Read a timeout value from the given buffer and place it in `ttr'.
+ * The interface and behavior are the same as in read_delay(). */
+static int read_ttr(int64_t *ttr, const char *buf, char **end) {
+    return read_delay(ttr, buf, end);
+}
+
+/* Read a tube name from the given buffer moving the buffer to
+ * the name start */
+static int read_tube_name(char **tubename, char *buf, char **end) {
+    size_t len;
+
+    while (buf[0] == ' ') ++buf;
+    len = strspn(buf, NAME_CHARS);
+    if (len == 0) return -1;
+    if (tubename) *tubename = buf;
+    if (end) *end = buf + len;
+    return 0;
+}
+
+static unsigned char which_cmd(conn_t *c) {
+#define TEST_CMD(s, c, o) \
+    if (strncmp((s), (c), CONSTSTRLEN(c)) == 0) return (o)
+    TEST_CMD(c->cmd, CMD_PUT, OP_PUT);
+    TEST_CMD(c->cmd, CMD_PEEKJOB, OP_PEEKJOB);
+    TEST_CMD(c->cmd, CMD_PEEK_READY, OP_PEEK_READY);
+    TEST_CMD(c->cmd, CMD_PEEK_DELAYED, OP_PEEK_DELAYED);
+    TEST_CMD(c->cmd, CMD_PEEK_BURIED, OP_PEEK_BURIED);
+    TEST_CMD(c->cmd, CMD_RESERVE_TIMEOUT, OP_RESERVE_TIMEOUT);
+    TEST_CMD(c->cmd, CMD_RESERVE, OP_RESERVE);
+    TEST_CMD(c->cmd, CMD_DELETE, OP_DELETE);
+    TEST_CMD(c->cmd, CMD_RELEASE, OP_RELEASE);
+    TEST_CMD(c->cmd, CMD_BURY, OP_BURY);
+    TEST_CMD(c->cmd, CMD_KICK, OP_KICK);
+    TEST_CMD(c->cmd, CMD_TOUCH, OP_TOUCH);
+    TEST_CMD(c->cmd, CMD_JOBSTATS, OP_JOBSTATS);
+    TEST_CMD(c->cmd, CMD_STATS_TUBE, OP_STATS_TUBE);
+    TEST_CMD(c->cmd, CMD_STATS, OP_STATS);
+    TEST_CMD(c->cmd, CMD_USE, OP_USE);
+    TEST_CMD(c->cmd, CMD_WATCH, OP_WATCH);
+    TEST_CMD(c->cmd, CMD_IGNORE, OP_IGNORE);
+    TEST_CMD(c->cmd, CMD_LIST_TUBES_WATCHED, OP_LIST_TUBES_WATCHED);
+    TEST_CMD(c->cmd, CMD_LIST_TUBE_USED, OP_LIST_TUBE_USED);
+    TEST_CMD(c->cmd, CMD_LIST_TUBES, OP_LIST_TUBES);
+    TEST_CMD(c->cmd, CMD_QUIT, OP_QUIT);
+    TEST_CMD(c->cmd, CMD_PAUSE_TUBE, OP_PAUSE_TUBE);
+    return OP_UNKNOWN;
+}
+
+static void do_cmd(conn_c *c) {
+    unsigned char type;
+    int ret;
+    uint32_t pri, body_size;
+    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
+    int64_t delay, ttr;
+    uint64_t id;
+    tube_t *t = NULL;
+
+    /* NUL-terminate this string so we can use strtol and friends */
+    c->cmd[c->cmd_len - 2] = '\0';
+
+    /* check for possible maliciousness */
+    if (strlen(c->cmd) != c->cmd_len - 2) {
+        return reply_msg(c, MSG_BAD_FORMAT);
+    }
+
+    type = which_cmd(c);
+    if (tasque_srv.verbose >= 2) {
+        printf("<%s:%d command %s\n", c->remote_ip, c->remote_port,
+                op_names[type]);
+    }
+
+    switch (type) {
+    case OP_PUT:
+        ret = read_pri(&pri, c->cmd + 4, &delay_buf);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_dealy(&delay, delay_buf, &ttr_buff);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        
+        ret = read_ttr(&ttr, ttr_buf, &size_buf);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+
+        body_size = strtoul(size_buf, &end_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ++tasque_srv.op_cnt[type];
+
+        if (body_size > JOB_DATA_SIZE_LIMIT) {
+            return re
+    }
+}
+
 static void handle_client(void *arg, int ev) {
     conn_t *c = (conn_t *)arg;
     int r;
-    //int to_read;
-    //job_t *j;
-    //
+    int to_read;
+    job_t *j;
+    struct iovec iov[2];
+
+    if (ev == EVENT_HUP) {
+        conn_close(c);
+        return;
+    }
 
     switch (c->state) {
     case STATE_WANTCOMMAND:
         r = read(c->sock.fd, c->cmd + c->cmd_read, 
-            LINE_BUF_SIZE - c->cmd_read);
+                LINE_BUF_SIZE - c->cmd_read);
         if (r < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK ||
-                    errno == EINTR) {
+                    errno = EINTR) {
                 return;
             }
             conn_close(c);
         }
-    
-    
-        if (r == 0) return conn_close(c);
-        return reply_msg(c, MSG_BAD_FORMAT);
-    case STATE_SENDWORD:
-        r = write(c->sock.fd, c->reply + c->reply_sent, 
-                c->reply_len - c->reply_sent);
-        if (r < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK ||
-                    errno == EINTR) {
-                return;
-            }
-            fprintf(stderr, "write failed\n");
-            conn_close(c);
-            return;
-        }
-        if (r == 0) return conn_close(c);
-        c->reply_sent += r;
 
-        if (c->reply_sent == c->reply_len) {
-            return conn_reset(c);
+        if (r == 0) return conn_close(c);   /* client close connection */
+        c->cmd_read += r;
+
+        c->cmd_len = cmd_len(c); 
+        /* when c->cmd_len > 0, we have a complete command */
+        if (c->cmd_len) return do_cmd(c);
+        if (c->cmd_read == LINE_BUF_SIZE) {
+            c->cmd_read = 0;    /* discard the input so far */
+            return reply_msg(c, MSG_BAD_FORMAT);
         }
-        return;
+
+        /* otherwise we have an incomplete line, so just keep waiting */
+        break;
+    case STATE_BITBUCKET:
+        /* XXX */
     }
-
-//    switch (c->state) {
-//    case STATE_WANTCOMMAND:
-//        r = read(c->sock.fd, c->cmd + c->cmd_read, 
-//                LINE_BUF_SIZE - c->cmd_read);
-//        if (r < 0) {
-//            if (errno == EAGAIN || errno == EWOULDBLOCK ||
-//                    errno = EINTR) {
-//                return;
-//            }
-//            conn_close(c);
-//        }
-//
-//        if (r == 0) return conn_close(c);   /* client close connection */
-//        c->cmd_read += r;
-//
-//        c->cmd_len = cmd_len(c); 
-//        /* when c->cmd_len > 0, we have a complete command */
-//        if (c->cmd_len) return do_cmd(c);
-//        if (c->cmd_read == LINE_BUF_SIZE) {
-//            c->cmd_read = 0;    /* discard the input so far */
-//            return reply_msg(c, MSG_BAD_FORMAT);
-//        }
-//
-//        /* otherwise we have an incomplete line, so just keep waiting */
-//        break;
-//    case STATE_BITBUCKET:
-//        /* XXX */
-//    }
 }
 
 void conn_accept(void *arg, int ev) {
-    char remote_ip[INET4_IP_LEN] = {};
+    char remote_ip[INET_ADDRSTRLEN] = {};
     int remote_port = 0;
     int cli_fd;
     conn_t *c;

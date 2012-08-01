@@ -35,6 +35,7 @@ typedef struct server_st {
     uint64_t    op_cnt[TOTAL_OPS];
     uint64_t    timeout_cnt;
     dlist       dirty_conns;
+    hash_t      all_jobs;
 } server_t;
 
 extern server_t tasque_srv;

@@ -4,8 +4,14 @@
 #include <stdint.h>
 #include "tube.h"
 
-typedef struct job_st job_t;
+#define JOB_INVALID         0
+#define JOB_READY           1
+#define JOB_RESERVED        2
+#define JOB_BURIED          3
+#define JOB_DELAYED         4
+#define JOB_COPY            5
 
+typedef struct job_st job_t;
 typedef struct job_record_st {
     uint64_t    id;
     uint32_t    pri;
@@ -23,21 +29,20 @@ typedef struct job_record_st {
 } jobrec_t;
 
 struct job_st {
-    jobrec_t   rec;
-    /* bookeeping fields; these are in-memory only */
-    job_t      *prev;
-    job_t      *next;
-    job_t      *ht_next;   /* next job in a hash table list */
+    jobrec_t    rec;
+    tube_t      *tube;
     size_t      heap_index; /* where is this job in its current heap */
     void        *reserver;
 };
 
-void job_set_heap_pos(void *, int);
-int job_pri_less(void *, void *);
-int job_delay_less(void *, void *);
-job_t *job_create(int body_size);
-job_t *job_find(uint64_t jobid);
-job_t *job_create_with_id(uint32_t pri, int64_t delay, int64_t ttr,
-        int body_size, tube_t *tube, uint64_t);
+job_t *job_create(int body_size, int64_t delay, int64_t ttr,
+        int body_size, tube_t *tube, unsigned long job_id);
+void job_free(job_t *j);
+job_t *job_find(uint64_t job_id);
+void job_set_heap_pos(void *arg, int pos);
+int job_pri_less(void *ax, void *bx);
+int job_delay_less(void *ax, void *bx);
+job_t *job_copy(job_t *j);
+const char *job_state(job_t *j);
 
 #endif /* __JOB_H_INCLUDED__ */

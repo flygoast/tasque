@@ -1,73 +1,39 @@
 #include <stdint.h>
+#include "srv.h"
 #include "tube.h"
 
-typedef struct job_st job_t;
-typedef struct job_record_st {
-    uint64_t    id;
-    uint32_t    pri;
-    int64_t     delay;
-    int64_t     ttr;
-    int32_t     body_size;
-    int64_t     created_at;
-    int64_t     deadline_at;
-    uint32_t    reserve_cnt;
-    uint32_t    timeout_cnt;
-    uint32_t    release_cnt;
-    uint32_t    bury_cnt;
-    uint32_t    kick_cnt;
-    uint8_t     state;
-} jobrec_t;
-
-struct job_st {
-    jobrec_t   rec;
-    size_t      heap_index; /* where is this job in its current heap */
-    void        *reserver;
-};
-
-static void job_store(job_t *t) {
-    int index = 0;
-    index = _get_job_hash_index(t->rec.id);
-    t->ht_next = all_jobs[index]; 
-    all_jobs[index] = t;
-    ++all_jobs_used;
-
-    /* accept a load factor of 4 */
-    if (all_jobs_used > (all_jobs_cap << 2)) rehash();
-}
-
-
-job_t *job_create(int body_size) {
+job_t *job_create(int body_size, int64_t delay, int64_t ttr,
+        int body_size, tube_t *tube, unsigned long job_id) {
     job_t *j = (jot_t *)calloc(1, sizeof(*j) + body_size);
     if (!j) return NULL;
     j->rec.created_at = ustime();
     j->rec.body_size = body_size;
-    j->next = j->prev = j;
-    return j;
-}
-
-job_t *job_create_with_id(uint32_t pri, int64_t delay, int64_t ttr,
-        int body_size, tube_t *tube, uint64_t id) {
-    job_t *j = job_create(body_size);
-    if (!j) return NULL;
-    if (id) {
-        j->rec.id = id;
-        if (id >= next_id) next_id = id + 1;
+    if (job_id) {
+        j->rec.id = job_id;
+        if (job_id >= tasque_srv.next_id) {
+            tasque_srv.next_id = job_id + 1;
+        }
     } else {
-        j->rec.id = next_id++;
+        j->rec.id = tasque_srv.next_id++;
     }
-    j->r.pri = pri;
-    j->r.delay = delay;
-    j->r.ttr = ttr;
+    j->rec.pri = pri;
+    j->rec.delay = delay;
+    j->rec.ttr = ttr;
 
-    store_job(j);
+    hash_insert(&tasque_srv.all_jobs, j->rec.id, j);
     TUBE_ASSIGN(j->tube, tube);
     return j;
 }
 
-void job_free(job_t *j);
+void job_free(job_t *j) {
+    hash_delete(&tasque_srv.all_jobs, (void *)(j->rec.id));
+    free(j);
+}
 
 /* lookup a job by job id */
-job_t *job_find(uint64_t job_id);
+job_t *job_find(uint64_t job_id) {
+    return (job_t *)hash_get_value(&tasque_srv.all_jobs, (void *)job_id);
+}
 
 /* the void* parameters are really job pointers */
 void job_set_heap_pos(void *arg, int pos) {
@@ -90,12 +56,33 @@ int job_delay_less(void *ax, void *bx) {
     return 0;
 }
 
-job_t *job_copy(job_t *j);
+job_t *job_copy(job_t *j) {
+    job_t *aj = (job_t *)malloc(sizeof(aj));
+    if (!aj) {
+        return NULL;
+    }
+    memcpy(aj, j, sizeof(job_t) + j->rec.body_size);
+    aj->tube = NULL;
+    TUBE_ASSIGN(aj->bute, j->tube);
+    aj->rec.state = JOB_COPY;
+    return aj;
+}
 
-const char *job_state(job_t *j);
+const char *job_state(job_t *j) {
+    if (j->rec.state == JOB_READY) {
+        return "ready";
+    }
 
-int job_list_any_p(job_t *p);
-job_t *job_remove(job_t j);
-void job_insert(job_t *head, job_t *j);
+    if (j->rec.state == JOB_RESERVED) {
+        return "reserved";
+    }
 
-uint64_t tobal_jobs(void);
+    if (j->rec.state == JOB_BURIED) {
+        return "buried";
+    }
+
+    if (j->rec.state == JOB_DELAYED) {
+        return "delayed";
+    }
+    return "invalid";
+}

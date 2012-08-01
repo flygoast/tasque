@@ -12,7 +12,6 @@
 #define CONN_TYPE_WORKER    0x2
 #define CONN_TYPE_WAITING   0x4
 #define conn_waiting(c)     ((c)->type & CONN_TYPE_WAITING)
-#define INET4_IP_LEN        16
 
 #define TOTAL_OPS               24
 
