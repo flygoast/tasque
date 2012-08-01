@@ -19,7 +19,7 @@ static unsigned long next_power(unsigned long size) {
     }
 }
 
-static unsigned int hash_func(const void *key) {
+unsigned long hash_func(const void *key) {
     unsigned int h = 5381;
     char *ptr = (char *)key;
 
@@ -28,6 +28,10 @@ static unsigned int hash_func(const void *key) {
     }
 
     return h;
+}
+
+unsigned long hash_func_int(const void *key) {
+    return (unsigned long)key;
 }
 
 /* the foreach function to use with the hash_clear() macro */
@@ -81,7 +85,7 @@ int hash_init(hash_t *ht, unsigned int slots) {
 /* Insert a key/value pair into the hash table. */
 int hash_insert(hash_t *ht, const void *key, const void *val) {
     hash_entry_t *he;
-    unsigned int hash, i;
+    unsigned long hash, i;
 
     assert(ht && key && val);
 
@@ -91,7 +95,11 @@ int hash_insert(hash_t *ht, const void *key, const void *val) {
         }
     }
 
-    hash = hash_func(key);
+    if (!ht->hash_fn) {
+        hash = hash_func(key);
+    } else {
+        hash = ht->hash_fn(key);
+    }
     i = hash % ht->slots;
 
     if ((he = ht->data[i])) {
@@ -362,6 +370,7 @@ void hash_iter_free(hash_iter_t *iter) {
 }
 
 #ifdef HASH_TEST_MAIN
+#include <time.h>
 static int _hash_print_foreach(const hash_entry_t *he, void *userptr) {
     printf("%s => %s\n", (char *)he->key, (char *)he->val);
     return 0;
@@ -412,7 +421,7 @@ int main(int argc, char *argv[]) {
     HASH_SET_FREE_VAL(ht, _demo_destructor);
     HASH_SET_KEYCMP(ht, _demo_cmp);
 
-    for (i = 0; i < 10000; ++i) {
+    for (i = 0; i < 100000; ++i) {
         len = randstring(buf, 1, sizeof(buf) - 1);
         buf[len] = '\0';
         len = randstring(buf2, 1, sizeof(buf2) - 1);
@@ -428,7 +437,7 @@ int main(int argc, char *argv[]) {
     assert(iter);
 
     do {
-        printf("%s=>%s\n", iter->key, iter->value);
+        printf("%s=>%s\n", (char *)iter->key, (char *)iter->value);
     } while (hash_iter_next(iter) == 0);
 
     hash_free(htcpy);

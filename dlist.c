@@ -18,7 +18,7 @@ dlist *dlist_create(void) {
     return dl;
 }
 
-void dlist_init(dlist_t *dl) {
+void dlist_init(dlist *dl) {
     dl->head = NULL;
     dl->tail = NULL;
     dl->len = 0;
@@ -219,7 +219,7 @@ dlist *dlist_dup(dlist *orig) {
     dlist_iter *iter;
     dlist_node *node;
 
-    if ((copy = dlist_init()) == NULL) {
+    if ((copy = dlist_create()) == NULL) {
         return NULL;
     }
 

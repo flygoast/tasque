@@ -26,7 +26,7 @@ static void set_sig_handlers() {
     }
 
     sa.sa_handler = enter_drain_mode;
-    ret = sigacion(SIGUSR1, &sa, NULL);
+    ret = sigaction(SIGUSR1, &sa, NULL);
     if (ret < 0) {
         fprintf(stderr, "sigaction(SIGUSR1) failed:%s\n", strerror(errno));
         exit(1);

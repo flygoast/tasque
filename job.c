@@ -20,33 +20,9 @@ typedef struct job_record_st {
 
 struct job_st {
     jobrec_t   rec;
-    /* bookeeping fields; these are in-memory only */
-    job_t      *prev;
-    job_t      *next;
-    job_t      *ht_next;    /* next job in a hash table list */
     size_t      heap_index; /* where is this job in its current heap */
     void        *reserver;
 };
-
-static uint64_t next_id = 1;
-static int      cur_prime = 0;
-
-static job_t *all_jobs_init[12289];
-static job_t **all_jobs = all_jobs_init;
-static size_t all_jobs_cap = 12289;
-static size_t all_jobs_used = 0;
-
-static int _get_job_hash_index(uint64_t job_id) {
-    return job_id % all_jobs_cap;
-}
-
-static void rehash() {
-    job_t *old = all_jobs;
-    size_t old_cap = all_jobs_cap, old_used = all_jobs_used, i;
-
-    if (cur_prime >= NUM_PRIMES) return;
-    
-}
 
 static void job_store(job_t *t) {
     int index = 0;
@@ -94,9 +70,25 @@ void job_free(job_t *j);
 job_t *job_find(uint64_t job_id);
 
 /* the void* parameters are really job pointers */
-void job_set_heap_pos(void *, int);
-int job_pri_less(void *, void *);
-int job_delay_less(void *, void *);
+void job_set_heap_pos(void *arg, int pos) {
+    ((job_t *)arg)->heap_index = pos;
+}
+
+int job_pri_less(void *ax, void *bx) {
+    job_t *a = (job_t *)ax; 
+    job_t *b = (job_t *)bx;
+    if (a->rec.pri < b->rec.pri) {
+        return 1;
+    }
+    return 0;
+}
+
+int job_delay_less(void *ax, void *bx) {
+    job_t *a = (job_t *)ax; 
+    job_t *b = (job_t *)bx;
+    if (a->rec.deadline_at < b->rec.deadline_at) return 1;
+    return 0;
+}
 
 job_t *job_copy(job_t *j);
 

@@ -37,8 +37,7 @@ typedef struct tube_st {
 
 
 tube_t *tube_create(const char *name);
-/* XXX */
-static void tube_free(tube_t *t);
+void tube_free(tube_t *t);
 void tube_dref(tube_t *t);
 void tube_iref(tube_t *t);
 tube_t *tube_find(const char *name);

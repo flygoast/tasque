@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include "job.h"
 #include "srv.h"
 #include "dlist.h"
@@ -33,8 +34,7 @@ tube_t *tube_create(const char *name) {
     return t;
 }
 
-static void tube_free(tube_t *t) {
-    /* XXX */
+void tube_free(tube_t *t) {
     heap_destroy(&t->ready_jobs);    
     heap_destroy(&t->delay_jobs);
     dlist_destroy(&t->buried_jobs);

@@ -13,8 +13,8 @@
 #include "dlist.h"
 #include "event.h"
 #include "tube.h"
-#include "job.h"
 #include "net.h"
+#include "job.h"
 
 #define INIT_WATCH_NUM  8
 #define min(a, b)       ((a) < (b) ? (a) : (b))
@@ -253,8 +253,31 @@ static const char *op_names[] = {
     CMD_PAUSE_TUBE,
 };
 
+static void on_watch(set_t *s, void *arg, size_t pos) {
+    tube_t *t = (tube_t *)arg;
+    tube_iref(t);
+    ++t->watching_cnt;
+}
+
+static void on_ignore(set_t *s, void *arg, size_t pos) {
+    tube_t *t = (tube_t *)arg;
+    --t->watching_cnt;
+    tube_dref(t);
+}
+
 static int conn_has_reserved_job(conn_t *c) {
     return dlist_length(&c->reserved_jobs) != 0;
+}
+
+static void conn_reset(conn_t *c) {
+    event_regis(&tasque_srv.evt, &c->sock, EVENT_RD);
+    if (!dlist_add_node_head(&tasque_srv.dirty_conns, c)) {
+        conn_close(c);
+        return;
+    }
+
+    c->reply_sent = 0;
+    c->state = STATE_WANTCOMMAND;
 }
 
 static void reply(conn_t *c, char *line, int len, int state) {
@@ -321,6 +344,7 @@ conn_t *conn_remove_waiting(conn_t *c) {
         --t->stats.waiting_cnt;
         set_remove(&t->waiting_conns, c);
     }
+    return c;
 }
 
 static int64_t conn_tickat(conn_t *c) {
@@ -367,29 +391,23 @@ job_t *conn_soonest_job(conn_t *c) {
 }
 
 int conn_less(void *conn_a, void *conn_b) {
-    return (conn_t *)conn_a->tickat < (conn_t *)conn_b->tickat;
+    return ((conn_t *)conn_a)->tickat < ((conn_t *)conn_b)->tickat;
 }
 
-int conn_record(void *conn, int pos) {
+void conn_record(void *conn, int pos) {
     ((conn_t *)conn)->tickpos = pos;
 }
 
 conn_t *conn_create(int fd, char start_state, tube_t *use,
         tube_t *watch) {
-    job_t *j;
+    //job_t *j;
     conn_t *c = (conn_t *)calloc(1, sizeof(*c));
-    if (vector_init(&c->watch, INIT_WATCH_NUM, sizeof(tube_t *)) < 0) {
-        free(c);
-        return NULL;
-    }
 
-    if (vector_push(&c->watch, watch) < 0) {
-        vector_destroy(&c->watch);
+    set_init(&c->watch, (set_event_fn)on_watch, (set_event_fn)on_ignore);
+    if (!set_append(&c->watch, watch)) {
         free(c);
         return NULL;
     }
-    tube_iref(watch);
-    ++watch->watching_cnt;
 
     TUBE_ASSIGN(c->use, use);
     ++use->using_cnt;
@@ -425,7 +443,7 @@ int conn_deadline_soon(conn_t *c) {
 }
 
 int conn_ready(conn_t *c) {
-    size_t  i;
+    //size_t  i;
     /*
     for (i = 0; i < c->watch.slots; ++i) {
         if ((tube_t*)vector_get_at(i)->ready_jobs.len) {
@@ -448,7 +466,7 @@ void conn_close(conn_t *c) {
         c->sock.fd = -1;
     }
 
-    job_free(c->in_job);
+    //job_free(c->in_job);
 
     /* TODO */
 }
@@ -474,22 +492,46 @@ static int cmd_len(conn_t *c) {
 
 static void handle_client(void *arg, int ev) {
     conn_t *c = (conn_t *)arg;
-    int r, to_read;
+    int r;
+    //int to_read;
     //job_t *j;
-    r = read(c->sock.fd, c->cmd + c->cmd_read, 
+    //
+
+    switch (c->state) {
+    case STATE_WANTCOMMAND:
+        r = read(c->sock.fd, c->cmd + c->cmd_read, 
             LINE_BUF_SIZE - c->cmd_read);
-    if (r < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK ||
-                errno == EINTR) {
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                    errno == EINTR) {
+                return;
+            }
+            conn_close(c);
+        }
+    
+    
+        if (r == 0) return conn_close(c);
+        return reply_msg(c, MSG_BAD_FORMAT);
+    case STATE_SENDWORD:
+        r = write(c->sock.fd, c->reply + c->reply_sent, 
+                c->reply_len - c->reply_sent);
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                    errno == EINTR) {
+                return;
+            }
+            fprintf(stderr, "write failed\n");
+            conn_close(c);
             return;
         }
-        conn_close(c);
+        if (r == 0) return conn_close(c);
+        c->reply_sent += r;
+
+        if (c->reply_sent == c->reply_len) {
+            return conn_reset(c);
+        }
+        return;
     }
-
-
-    if (r == 0) return conn_close(c);
-    return reply_msg(c, MSG_BAD_FORMAT);
-
 
 //    switch (c->state) {
 //    case STATE_WANTCOMMAND:
@@ -521,14 +563,15 @@ static void handle_client(void *arg, int ev) {
 //    }
 }
 
-void conn_accept(const int fd, const short which, void *arg) {
+void conn_accept(void *arg, int ev) {
     char remote_ip[INET4_IP_LEN] = {};
     int remote_port = 0;
     int cli_fd;
     conn_t *c;
     int ret;
+
     evtent_t *sock = (evtent_t *)arg;
-    if ((cli_fd = tcp_accept(fd, remote_ip, &remote_port)) < 0) {
+    if ((cli_fd = tcp_accept(sock->fd, remote_ip, &remote_port)) < 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
             fprintf(stderr, "accept failed:%s\n", strerror(errno));
         }

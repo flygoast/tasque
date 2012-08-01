@@ -32,6 +32,9 @@ struct job_st {
     void        *reserver;
 };
 
+void job_set_heap_pos(void *, int);
+int job_pri_less(void *, void *);
+int job_delay_less(void *, void *);
 job_t *job_create(int body_size);
 job_t *job_find(uint64_t jobid);
 job_t *job_create_with_id(uint32_t pri, int64_t delay, int64_t ttr,

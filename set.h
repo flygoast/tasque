@@ -1,6 +1,8 @@
 #ifndef __SET_H_INCLUDED__
 #define __SET_H_INCLUDED__
 
+#include <sys/types.h>
+
 typedef struct set set_t;
 typedef void (*set_event_fn)(set_t *a, void *item, size_t i);
 

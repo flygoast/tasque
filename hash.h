@@ -5,6 +5,7 @@
 #define HASH_RESIZE_RATIO   1       /* (ht->count / ht->slots) */
 
 /* assign macros */
+#define HASH_SET_HASHFN(ht, func)   (ht)->hash_fn = (func)
 #define HASH_SET_KEYCMP(ht, func)   (ht)->keycmp = (func)
 #define HASH_SET_KEYCPY(ht, func)   (ht)->keycpy = (func)
 #define HASH_SET_VALCPY(ht, func)   (ht)->valcpy = (func)
@@ -51,20 +52,23 @@ typedef struct _hash_entry_t {
     struct _hash_entry_t *next;
 } hash_entry_t;
 
-typedef struct _hash_t {
-    unsigned int    slots;
-    unsigned int    count;
+typedef struct _hash_t hash_t;
+
+struct _hash_t {
+    unsigned long   slots;
+    unsigned long   count;
 
     /* the table */
     struct _hash_entry_t    **data;
 
     /* implemantation associated function pointers */
+    unsigned long (*hash_fn)(const void *);
     int (*keycmp)(const void *, const void *);
     void *(*keycpy)(const void *);
     void *(*valcpy)(const void *);
     void (*free_key)(void *);
     void (*free_val)(void *);
-} hash_t;
+};
 
 typedef struct hash_iter {
     unsigned int    pos;
@@ -82,6 +86,23 @@ hash_t *hash_create(unsigned int slots);
 /* initialise a hash table */
 int hash_init(hash_t *ht, unsigned int slots);
 
+/* integer hash function */
+unsigned long hash_func_int(const void *key);
+
+/* string hash function */
+unsigned long hash_func(const void *key);
+
+/* destroy a hash table */
+void hash_destroy(hash_t *ht);
+
+/* free a hash table */
+void hash_free(hash_t *ht);
+
+/* insert a key/value pair into a hash table */
+int hash_insert(hash_t *ht, const void *key, const void *val);
+
+/* get a value by key */
+void *hash_get_val(hash_t *ht, const void *key);
 /* destroy a hash table */
 void hash_destroy(hash_t *ht);
 
