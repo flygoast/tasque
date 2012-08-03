@@ -310,6 +310,40 @@ static void conn_reset(conn_t *c) {
     c->state = STATE_WANTCOMMAND;
 }
 
+static void conn_enqueue_waiting(conn_t *c) {
+    tube_t *t;
+    size_t i;
+
+    ++tasque_srv.global_stat.waiting_cnt;
+    c->type |= CONN_TYPE_WAITING;
+
+    for (i = 0; i < c->watch.used; ++i) {
+        t = c->watch.items[i];
+        ++t->stat.waiting_cnt;
+        set_append(&t->waiting, c);
+    }
+}
+
+static void wait_for_job(conn_t *c, int timeout) {
+    c->state = STATE_WAIT;
+    conn_enqueue_waiting(c); 
+
+    /* Set the pending timeout to the requested timeout amount */
+    c->pending_timeout = timeout;
+
+    c->ev = EVENT_HUP;
+    c->tickat = conn_tickat(c);
+    if (c->tickpos > -1) {
+        heap_remove(&s->conns, c->tickpos);
+    }
+
+    if (c->tickat) {
+        heap_insert(&s->conns, c);
+    }
+
+    dlist_add_node_head(&tasque_srv.dirty_conns, c);
+}
+
 /* Copy up to body_size trailing bytes into the job, then the rest
  * into the cmd buffer. If c->in_job exists, this assume that
  * c->in_job->body is empty.
@@ -521,14 +555,13 @@ int conn_deadline_soon(conn_t *c) {
 }
 
 int conn_ready(conn_t *c) {
-    //size_t  i;
-    /*
-    for (i = 0; i < c->watch.slots; ++i) {
-        if ((tube_t*)vector_get_at(i)->ready_jobs.len) {
+    size_t  i;
+
+    for (i = 0; i < c->watch.used; ++i) {
+        if (((tube_t*)c->watch.items[i])->ready_jobs.len) {
             return 1;
         }
     }
-    */
     return 0;
 }
 
@@ -758,6 +791,32 @@ static void enqueue_incoming_job(conn_t *conn) {
     return reply_line(c, STATE_SENDWORD, MSG_BURIED_FMT, j->rec.id);
 }
 
+static job_t *remove_buried_job(job_t *j) {
+    dlist_node *dn;
+    if (!j || j->rec.state != JOB_BURIED) return NULL;
+    dn = dlist_search_key(&tasque_srv.buried_jobs, j);
+    if (!dn) return NULL;
+    dlist_delete_node(&tasque_srv.buried_jobs, dn);
+
+    if (j) {
+        --tasque_srv.global_stat.buried_cnt;
+        --j->tube->stat.buried_cnt;
+    }
+    return j;
+}
+
+static job_t *remove_ready_job(j) {
+    dlist_node *dn;
+    if (!j || j->rec.state != JOB_READY) return NULL;
+    heap_remove(&j->tube->ready_jobs, j->heap_index);
+    --tasque_srv.ready_cnt;
+    if (j->rec.pri < URGENT_THRESHOLD) {
+        --tasque_srv.global_stat.urgent_cnt;
+        --j->tube->stat.urgent_cnt;
+    }
+    return j;
+}
+
 static void do_cmd(conn_c *c) {
     unsigned char type;
     int ret;
@@ -837,7 +896,8 @@ static void do_cmd(conn_c *c) {
         }
 
         if (!j) {
-            return reply(c, MSG_NOTFOUNT, MSG_NOTFOUND_LEN, STATE_SENDWORD);
+            reply(c, MSG_NOTFOUNT, MSG_NOTFOUND_LEN, STATE_SENDWORD);
+            return;
         }
 
         reply_job(c, j, MSG_FOUND);
@@ -874,7 +934,61 @@ static void do_cmd(conn_c *c) {
             reply_job(c, j, MSG_FOUND);
         }
         break;
+    case OP_PEEKJOB:
+        id = strtoull(c->cmd + CMD_PEEK_JOB_LEN, &end_buf, 0);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
 
+        /* So, peek is annoying, because some other connection might
+         * free the job while we are still trying to write it out.
+         * So we copy it and then free the copy when it's done sending. */
+        j = job_copy(job_find(id));
+        if (!j) {
+            return reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN, STATE_SENDWORD);
+        }
+        reply_job(c, j, MSG_FOUND);
+        break;
+    case OP_RESERVE_TIMEOUT:
+        timeout = strtol(c->cmd + CMD_RESERVE_TIMEOUT_LEN, &end_buf, 10);
+        if (errno) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        /* fall through */
+    case OP_RESERVE:
+        /* don't allow trailing garbage */
+        if (type == OP_RESERVE && c->cmd_len != CMD_RESERVE_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+
+        ++tasque_srv.op_cnt[type];
+        conn_set_worker(c);
+
+        if (conn_deadline_soon(c) && !conn_ready(c)) {
+            return reply_msg(c, MSG_DEADLINE_SOON);
+        }
+
+        /* try to get a new job for this guy */
+        wait_for_job(c, timeout);
+        process_queue();
+        break;
+    case OP_DELETE:
+        id = strtoull(c->cmd + CMD_DELETE_LEN, &end_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.opt_cnt[type];
+
+        j = job_find(id);
+        j = remove_reserved_job(c, j) ? :
+            remove_ready_job(j) ? :
+            remove_buried_job(j) ? :
+            remove_delayed_job(j);
+
+        if (!j) {
+            reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN, STATE_SENDWORD);
+            return;
+        }
+        ++j->tube->stat.total_delete_cnt;
+        j->rec.state = JOB_INVALID;
+        job_free(j);
     }
 }
 
