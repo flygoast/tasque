@@ -73,8 +73,7 @@ int heap_init(heap_t *h) {
     h->cap = HEAP_INIT_SIZE;
     h->len = 0;
     h->data = (void **)calloc(h->cap, sizeof(void *));
-    if (!h->data) 
-        return -1;
+    if (!h->data) return -1;
     h->less = NULL;
     h->record = NULL;
     return 0;

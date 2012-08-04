@@ -2,11 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include "job.h"
+#include "tube.h"
 #include "srv.h"
 #include "dlist.h"
 #include "heap.h"
-#include "tube.h"
+#include "set.h"
+#include "job.h"
 
 tube_t *tube_create(const char *name) {
     tube_t *t = (tube_t *)calloc(sizeof(*t), 1);
@@ -14,7 +15,7 @@ tube_t *tube_create(const char *name) {
     strncpy(t->name, name, MAX_TUBE_NAME_LEN - 1);
     if (t->name[MAX_TUBE_NAME_LEN - 1] != '\0') {
         fprintf(stderr, "truncating tube name\n");
-    };
+    }
 
     if (heap_init(&t->ready_jobs) != 0) {
         free(t);
@@ -35,7 +36,7 @@ tube_t *tube_create(const char *name) {
 }
 
 void tube_free(tube_t *t) {
-    heap_destroy(&t->ready_jobs);    
+    heap_destroy(&t->ready_jobs);
     heap_destroy(&t->delay_jobs);
     dlist_destroy(&t->buried_jobs);
     set_destroy(&t->waiting_conns);
@@ -51,6 +52,7 @@ void tube_dref(tube_t *t) {
 
     --t->refs;
     if (t->refs < 1) {
+        /* TODO */
         tube_free(t);
     }
 }
@@ -75,4 +77,25 @@ tube_t *tube_find(const char *name) {
 
 int tube_has_buried_job(tube_t *t) {
     return dlist_length(&t->buried_jobs) != 0;
+}
+
+tube_t *tube_make_and_insert(const char *name) {
+    int ret;
+    tube_t *t = tube_create(name);
+    if (!t) return NULL;
+    ret = set_append(&tasque_srv.tubes, t);
+    if (ret != 0) {
+        tube_free(t);
+        return NULL;
+    }
+    return t;
+}
+
+void tube_free_and_remove(tube_t *t) {
+    tube_free(t);
+    set_remove(&tasque_srv.tubes, t);
+}
+
+tube_t *tube_find_or_create(const char *name) {
+    return tube_find(name) ? : tube_make_and_insert(name);
 }

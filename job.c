@@ -1,9 +1,10 @@
 #include <stdint.h>
 #include "srv.h"
 #include "tube.h"
+#include "times.h"
 
 job_t *job_create(int body_size, int64_t delay, int64_t ttr,
-        int body_size, tube_t *tube, unsigned long job_id) {
+        int body_size, tube_t *tube, uintptr_t job_id) {
     job_t *j = (jot_t *)calloc(1, sizeof(*j) + body_size);
     if (!j) return NULL;
     j->rec.created_at = ustime();
@@ -20,8 +21,12 @@ job_t *job_create(int body_size, int64_t delay, int64_t ttr,
     j->rec.delay = delay;
     j->rec.ttr = ttr;
 
-    hash_insert(&tasque_srv.all_jobs, j->rec.id, j);
-    TUBE_ASSIGN(j->tube, tube);
+    if (hash_insert(&tasque_srv.all_jobs, j->rec.id, j) != 0) {
+        free(j);
+        return NULL;
+    }
+    j->tube = tube;
+    tube_iref(j->tube);
     return j;
 }
 
@@ -31,7 +36,7 @@ void job_free(job_t *j) {
 }
 
 /* lookup a job by job id */
-job_t *job_find(uint64_t job_id) {
+job_t *job_find(uintptr_t job_id) {
     return (job_t *)hash_get_value(&tasque_srv.all_jobs, (void *)job_id);
 }
 
@@ -63,7 +68,8 @@ job_t *job_copy(job_t *j) {
     }
     memcpy(aj, j, sizeof(job_t) + j->rec.body_size);
     aj->tube = NULL;
-    TUBE_ASSIGN(aj->bute, j->tube);
+    aj->bute = j->tube;
+    tube_iref(aj->bute);
     aj->rec.state = JOB_COPY;
     return aj;
 }

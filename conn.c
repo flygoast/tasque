@@ -791,6 +791,22 @@ static void enqueue_incoming_job(conn_t *conn) {
     return reply_line(c, STATE_SENDWORD, MSG_BURIED_FMT, j->rec.id);
 }
 
+
+static job_t *remove_reserved_job(conn_t *c, job_t *j) {
+    dlist_node *dn;
+    if (!j || j->rec.state != JOB_BURIED) return NULL;
+    dn = dlist_search_key(&tasque_srv.buried_jobs, j);
+    if (!dn) return NULL;
+    dlist_delete_node(&tasque_srv.buried_jobs, dn);
+    if (j) {
+        --tasque_srv.global_stat.reserved_cnt;
+        --j->tube->stat.reserved_cnt;
+        j->reserver = NULL;
+    }
+    c->soonest_job = NULL;
+    return j;
+}
+
 static job_t *remove_buried_job(job_t *j) {
     dlist_node *dn;
     if (!j || j->rec.state != JOB_BURIED) return NULL;
@@ -805,7 +821,7 @@ static job_t *remove_buried_job(job_t *j) {
     return j;
 }
 
-static job_t *remove_ready_job(j) {
+static job_t *remove_ready_job(job_t *j) {
     dlist_node *dn;
     if (!j || j->rec.state != JOB_READY) return NULL;
     heap_remove(&j->tube->ready_jobs, j->heap_index);
@@ -815,6 +831,43 @@ static job_t *remove_ready_job(j) {
         --j->tube->stat.urgent_cnt;
     }
     return j;
+}
+
+static job_t *remove_delayed_job(job_t *j) {
+    if (!j || j->rec.state != JOB_READY) return NULL;
+    heap_remove(&j->tube->ready_jobs, j->heap_index);
+    --tasque_srv.ready_cnt;
+    if (j->rec.pri < URGENT_THRESHOLD) {
+        --tasque_srv.global_stat.urgent_cnt;
+        --j->tube->stat.urgent_cnt;
+    }
+    return j;
+}
+
+static uint32_t kick_buried_job(tube_t *t) {
+    int ret;
+    job_t *j;
+    int z;
+
+    if (!tube_has_buried_job(t)) return 0;
+    /* TODO */
+    return ret;
+}
+
+static uint32_t kick_buried_jobs(tube_t *t, uint32_t n) {
+    uint32_t i = 0;
+    for (i = 0; (i < n) &&  kick_buried_job(t); ++i) { /* do nothing */ }
+    return i;
+}
+
+static uint32_t kick_delayed_jobs(tube_t *t, uint32_t n) {
+    uint32_t i = 0;
+    for (i = 0; (i < n) &&  kick_delayed_job(t); ++i) { /* do nothing */ }
+    return i;
+}
+
+static uint32_t kick_jobs(tube_t *t, uint32_t n) {
+    if (tube_has_buried_job(t)) return 
 }
 
 static void do_cmd(conn_c *c) {
@@ -989,6 +1042,70 @@ static void do_cmd(conn_c *c) {
         ++j->tube->stat.total_delete_cnt;
         j->rec.state = JOB_INVALID;
         job_free(j);
+
+        break;
+    case OP_RELEASE:
+        id = strtoull(c->cmd + CMD_RELEASE_LEN, &pri_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_pri(&pri, pri_buf, &delay_buf);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_delay(&delay, delay_buf, NULL);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque.op_cnt[type];
+
+        j = remove_reserved_job(c, job_find(id));
+
+        if (!j) {
+            return reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN,
+                    STATE_SENDWORD);
+        }
+
+        j->rec.pri = pri;
+        j->rec.delay = delay;
+        ++j->rec.release_cnt;
+
+        ret = enqueue_job(j, delay);
+        if (ret < 0) {
+            return reply_serr(c, MSG_INTERNAL_ERROR);
+        }
+        if (ret == 1) {
+            return reply(c, MSG_RELEASED, MSG_RELEASED_LEN,
+                    STATE_SENDWORD);
+        }
+        bury_job(j);
+        reply(c, MSG_BURIED, MSG_BURIED_LEN, STATE_SENDWORD);
+        break;
+
+    case OP_BURY:
+        id = strtoull(c->cmd + CMD_BURY_LEN, &pri_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_pri(&pri, pri_buf, NULL);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        j = remove_reserved_job(c, job_find(id));
+
+        if (!j) {
+            reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN, STATE_SENDWORD);
+            return;
+        }
+        j->rec.pri = pri;
+        ret = bury_job(j, 1);
+        if (ret) return reply_serr(c, MSG_INTERNAL_ERROR);
+        reply(c, MSG_BURIED, MSG_BURIED_LEN, STATE_SENDWORD);
+        break;
+    case OP_KICK:
+        count = strtoull(c->cmd + CMD_KICK_LEN, &end_buf, 10);
+        if (end_buf == c->cmd + CMD_KICK_LEN) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+
+        i = kick_jobs(c->use, count);
+        return reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
     }
 }
 

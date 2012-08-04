@@ -36,9 +36,9 @@ struct job_st {
 };
 
 job_t *job_create(int body_size, int64_t delay, int64_t ttr,
-        int body_size, tube_t *tube, unsigned long job_id);
+        int body_size, tube_t *tube, uintptr_t job_id);
 void job_free(job_t *j);
-job_t *job_find(uint64_t job_id);
+job_t *job_find(uintptr_t job_id);
 void job_set_heap_pos(void *arg, int pos);
 int job_pri_less(void *ax, void *bx);
 int job_delay_less(void *ax, void *bx);

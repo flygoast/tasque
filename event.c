@@ -24,7 +24,7 @@ static void handle(evtent_t *ent, int evset) {
     ent->f(ent->x, c);
 }
 
-/* interval in unit of minisecond */
+/* interval in unit of minisecond(ms) */
 event_t *event_create(handle_fn tick, void *tickval, int interval) {
     event_t *evt = (event_t*)calloc(1, sizeof(*evt));
     if (event_init(evt, tick, tickval, interval) != 0) {

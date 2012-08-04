@@ -42,5 +42,8 @@ void tube_dref(tube_t *t);
 void tube_iref(tube_t *t);
 tube_t *tube_find(const char *name);
 int tube_has_buried_job(tube_t *t);
+tube_t *tube_make_and_insert(const char *name);
+void tube_free_and_remove(tube_t *t);
+tube_t *tube_find_or_create(const char *name);
 
 #endif /* __TUBE_H_INCLUDED__ */

@@ -27,8 +27,7 @@ typedef struct server_st {
     uint32_t    tot_conn_cnt;
     int         cur_producer_cnt;
 
-    uint64_t    next_job_id;
-    hash_t      hash;
+    uintptr_t   next_job_id;
     int         ready_cnt;
 
     stats_t     global_stat;
