@@ -638,10 +638,6 @@ static int scan_eol(const char *s, int size) {
     return 0;
 }
 
-static int cmd_len(conn_t *c) {
-    return scan_eol(c->cmd, c->cmd_read);
-}
-
 /* Read a priority value from the given buffer and place it in pri.
  * Update `end' to point to the address after the last character
  * consumed. `pri' and `end' can be NULL. If they are both NULL,
@@ -1155,7 +1151,6 @@ static void do_cmd(conn_t *c) {
 static void handle_client(void *arg, int ev) {
     conn_t *c = (conn_t *)arg;
     int r;
-//    int to_read;
     job_t *j;
 
     if (ev == EVENT_HUP) {
@@ -1163,6 +1158,7 @@ static void handle_client(void *arg, int ev) {
         return;
     }
 
+    /* Hehe..., everyone love status machine. */
     switch (c->state) {
     case STATE_WANTCOMMAND:
         r = read(c->sock.fd, c->cmd + c->cmd_read, 
@@ -1173,12 +1169,15 @@ static void handle_client(void *arg, int ev) {
                 return;
             }
             conn_close(c);
+            return;
+        } else if (r == 0) {
+            return conn_close(c);   /* client close connection */
         }
 
-        if (r == 0) return conn_close(c);   /* client close connection */
-        c->cmd_read += r;
+        c->cmd_read += r; /* we got some bytes */
 
-        c->cmd_len = cmd_len(c); 
+        c->cmd_len = scan_eol(c->cmd, c->cmd_read);
+
         /* when c->cmd_len > 0, we have a complete command */
         if (c->cmd_len) return do_cmd(c);
         if (c->cmd_read == LINE_BUF_SIZE) {
