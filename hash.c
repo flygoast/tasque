@@ -87,8 +87,6 @@ int hash_insert(hash_t *ht, const void *key, const void *val) {
     hash_entry_t *he;
     unsigned long hash, i;
 
-    assert(ht && key && val);
-
     if ((ht->count /  ht->slots) >= HASH_RESIZE_RATIO) {
         if (hash_resize(ht) != 0) {
             return -1;

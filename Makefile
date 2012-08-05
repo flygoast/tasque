@@ -1,6 +1,6 @@
 PREFIX=/usr/local
 BINDIR=$(PREFIX)/bin
-CFLAGS=-Wall -Werror
+CFLAGS=-Wall -Werror -g
 LDFLAGS=
 OS=$(shell uname -s | tr A-Z a-z)
 INSTALL=install

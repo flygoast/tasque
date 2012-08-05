@@ -34,7 +34,7 @@ static void set_sig_handlers() {
 }
 
 static void option_parse(int argc, char **argv) {
-    /* TODO */
+    tasque_srv.verbose = 3;
 }
 
 int main(int argc, char **argv) {

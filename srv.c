@@ -73,6 +73,7 @@ void srv_init() {
         fprintf(stderr, "hash_init failed\n");
         exit(1);
     }
+    HASH_SET_HASHFN(&tasque_srv.all_jobs, hash_func_int);
 }
 
 void srv_serve() {
@@ -95,7 +96,7 @@ void srv_serve() {
         exit(1);
     }
 
-    tasque_srv.sock.x = &tasque_srv;
+    tasque_srv.sock.x = &tasque_srv.sock;
     tasque_srv.sock.f = (handle_fn)conn_accept;
     tasque_srv.sock.fd = sockfds[0];
     tasque_srv.sock.added = 0;

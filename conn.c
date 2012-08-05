@@ -1271,6 +1271,10 @@ void conn_accept(void *arg, int ev) {
         }
         return;
     }
+
+    memcpy(c->remote_ip, remote_ip, INET_ADDRSTRLEN);
+    c->remote_port = remote_port;
+
     c->sock.x = c;
     c->sock.f = (handle_fn)handle_client;
     c->sock.fd = cli_fd;
