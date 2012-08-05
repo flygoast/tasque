@@ -2,8 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include "net.h"
 
@@ -73,6 +77,57 @@ int create_socket(const char *ifname, int port,
     return count;
 }
 
+static int net_generic_accept(int sockfd, struct sockaddr *sa, 
+        socklen_t *len) {
+    int fd;
+    while (1) {
+        fd = accept(sockfd, sa, len);
+        if (fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            } else {
+                return -1;
+            }
+        }
+        break;
+    }
+    return fd;
+}
+
+int tcp_accept(int sockfd, char *ip, int *port) {
+    int fd;
+    struct sockaddr_in sa;
+    socklen_t salen = sizeof(sa);
+    if ((fd = net_generic_accept(sockfd, 
+            (struct sockaddr*)&sa, &salen)) == -1) {
+        return -1;
+    }
+
+    if (ip) {
+        strcpy(ip, inet_ntoa(sa.sin_addr));
+    }
+
+    if (port) {
+        *port = ntohs(sa.sin_port);
+    }
+    return fd;
+}
+
+int net_nonblock(int fd) {
+    int flags;
+
+    /* Set the socket nonblocking. Note that fcntl(2) for F_GETFL
+       and F_SETFL can't be interrupted by a signal. */
+    if ((flags = fcntl(fd, F_GETFL)) == -1) {
+        return -1;
+    }
+
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        return -1;
+    }
+    return 0;
+}
+
 #ifdef NET_TEST_MAIN
 #include <sys/select.h>
 #include <errno.h>
@@ -128,56 +183,4 @@ int main(int argc, char *argv[]) {
     }
     exit(0);
 }
-
-static int net_generic_accept(int sockfd, struct sockaddr *sa, 
-        socklen_t *len) {
-    int fd;
-    while (1) {
-        fd = accept(sockfd, sa, len);
-        if (fd < 0) {
-            if (errno == EINTR) {
-                continue;
-            } else {
-                return -1;
-            }
-        }
-        break;
-    }
-    return fd;
-}
-
-int tcp_accept(int sockfd, char *ip, int *port) {
-    int fd;
-    struct sockaddr_in sa;
-    socklen_t salen = sizeof(sa);
-    if ((fd = anet_generic_accept(err, sockfd, 
-            (struct sockaddr*)&sa, &salen)) == -1) {
-        return -1;
-    }
-
-    if (ip) {
-        strcpy(ip, inet_ntoa(sa.sin_addr));
-    }
-
-    if (port) {
-        *port = ntohs(sa.sin_port);
-    }
-    return fd;
-}
-
-int net_nonblock(int fd) {
-    int flags;
-
-    /* Set the socket nonblocking. Note that fcntl(2) for F_GETFL
-       and F_SETFL can't be interrupted by a signal. */
-    if ((flags = fcntl(fd, F_GETFL)) == -1) {
-        return -1;
-    }
-
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
-        return -1;
-    }
-    return 0;
-}
-
 #endif /* NET_TEST_MAIN */

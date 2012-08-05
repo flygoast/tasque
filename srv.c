@@ -2,15 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <unistd.h>
 #include <pwd.h>
 #include <sys/types.h>
 #include "srv.h"
 #include "conn.h"
 #include "tube.h"
+#include "net.h"
 
 #define DEFAULT_PORT        8774
 #define INIT_TUBE_NUM       8
-#define INIT_HASH_NUM       128
+#define INIT_JOB_NUM        128
 
 /* global server configure and storage */
 server_t tasque_srv;
@@ -54,21 +56,20 @@ void srv_init() {
 
     set_init(&tasque_srv.tubes, NULL, NULL);
 
-    t = tube_create("default");
+    t = tube_make_and_insert("default");
     if (!t) {
-        fprintf(stderr, "tube_create default failed\n");
+        fprintf(stderr, "create default tube failed\n");
         exit(1);
     }
-    set_append(&tasque_srv.tubes, t);
-    /* XXX */
     tasque_srv.default_tube = t;
+    tube_iref(t);
 
     if (heap_init(&tasque_srv.conns) != 0) {
         fprintf(stderr, "heap_init failed\n");
         exit(1);
     }
 
-    if (hash_init(&tasque_srv.hash, INIT_HASH_NUM) != 0) {
+    if (hash_init(&tasque_srv.all_jobs, INIT_JOB_NUM) != 0) {
         fprintf(stderr, "hash_init failed\n");
         exit(1);
     }
@@ -115,6 +116,6 @@ void srv_destroy() {
     event_destroy(&tasque_srv.evt);
     heap_destroy(&tasque_srv.conns);
     set_destroy(&tasque_srv.tubes);
-    hash_destroy(&tasque_srv.hash);
+    hash_destroy(&tasque_srv.all_jobs);
     dlist_destroy(&tasque_srv.dirty_conns);
 }

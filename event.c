@@ -3,6 +3,7 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include <unistd.h>
 #include <sys/epoll.h>
 #include "times.h"
 #include "event.h"
@@ -80,7 +81,7 @@ int event_regis(event_t *evt, evtent_t *ent, int rwd) {
 }
 
 void event_loop(event_t *evt) {
-    int i, r, n = 512;
+    int i, r;
     long long e, t = ustime();
     struct epoll_event evs[512];
 
@@ -131,6 +132,7 @@ evtent_t *event_entry_create(handle_fn handler, void *arg, int fd) {
     ent->f = handler;
     ent->x = arg;
     ent->added = 0;
+    return ent;
 }
 
 void event_entry_free(evtent_t *ent) {

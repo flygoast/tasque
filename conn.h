@@ -1,6 +1,7 @@
 #ifndef __CONN_H_INCLUDED__
 #define __CONN_H_INCLUDED__
 
+#include <netinet/in.h>
 #include "event.h"
 #include "tube.h"
 #include "job.h"
@@ -19,7 +20,7 @@ typedef struct conn_st conn_t;
 
 struct conn_st {
     evtent_t    sock;
-    char        remote_ip[INET4_IP_LEN];
+    char        remote_ip[INET_ADDRSTRLEN];
     int         remote_port;
     char        state;
     char        type;
@@ -62,5 +63,6 @@ void conn_set_worker(conn_t *c);
 job_t *conn_soonest_job(conn_t *c);
 int conn_deadline_soon(conn_t *c);
 int conn_ready(conn_t *c);
+int64_t conn_tickat(conn_t *c);
 
 #endif /*  __CONN_H_INCLUDED__ */

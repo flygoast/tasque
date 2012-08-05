@@ -13,7 +13,7 @@
 
 typedef struct job_st job_t;
 typedef struct job_record_st {
-    uint64_t    id;
+    uintptr_t   id;
     uint32_t    pri;
     int64_t     delay;
     int64_t     ttr;
@@ -33,9 +33,10 @@ struct job_st {
     tube_t      *tube;
     size_t      heap_index; /* where is this job in its current heap */
     void        *reserver;
+    char        body[];
 };
 
-job_t *job_create(int body_size, int64_t delay, int64_t ttr,
+job_t *job_create(int pir, int64_t delay, int64_t ttr,
         int body_size, tube_t *tube, uintptr_t job_id);
 void job_free(job_t *j);
 job_t *job_find(uintptr_t job_id);
