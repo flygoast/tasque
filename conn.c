@@ -572,11 +572,9 @@ void conn_set_worker(conn_t *c) {
 //    return 0;
 //}
 
-void conn_close(conn_t *c) {
-    event_regis(&tasque_srv.evt, &c->sock, EVENT_DEL);
-
+void conn_free(conn_t *c) {
     if (tasque_srv.verbose) {
-        printf("close %d\n", c->sock.fd);
+        printf("close connection %s:%d\n", c->remote_ip, c->remote_port);
     }
 
     if (c->sock.fd >= 0) {
@@ -618,11 +616,17 @@ void conn_close(conn_t *c) {
     --tasque_srv.cur_conn_cnt;
     --tasque_srv.tot_conn_cnt;
     free(c);
+
+}
+
+void conn_close(conn_t *c) {
+    event_regis(&tasque_srv.evt, &c->sock, EVENT_DEL);
+    conn_free(c);
 }
 
 
 void conn_tick(void *tickarg, int ev) {
-    /* Do nothing */
+    /* do nothing */
 }
 
 /* Always returns at least 2 if a match is found. Return 0 if no match. */
@@ -1283,7 +1287,7 @@ void conn_accept(void *arg, int ev) {
     ret = event_regis(&tasque_srv.evt, &c->sock, EVENT_RD);
     if (ret < 0) {
         fprintf(stderr, "event_regis failed\n");
-        /* TODO conn_close */
+        conn_free(c);
         if (tasque_srv.verbose) {
             printf("close connection %s:%d\n", remote_ip, remote_port);
         }
