@@ -224,8 +224,7 @@
 
 /* this number is pretty arbitrary */
 #define BUCKET_BUF_SIZE     1024
-
-//static char bucket[BUCKET_BUF_SIZE];
+static char bucket[BUCKET_BUF_SIZE];
 
 static const char *op_names[] = {
     "<unknown>",
@@ -352,8 +351,7 @@ static void fill_extra_data(conn_t *c) {
     /* how many extra_bytes did we read? */
     extra_bytes = c->cmd_read - c->cmd_len;
 
-    /* how many bytes should we put into the job body? */
-    if (c->in_job) {
+    if (c->in_job) { /* we are reading job content */
         job_data_bytes = min(extra_bytes, c->in_job->rec.body_size);
         memcpy(c->in_job->body, c->cmd + c->cmd_len, job_data_bytes);
         c->in_job_read = job_data_bytes;
@@ -370,7 +368,6 @@ static void fill_extra_data(conn_t *c) {
     c->cmd_len = 0; /* we no longer know the length of the new command */
 }
 
-//#define skip(c, n, m)   (_skip(c, n, m, CONSTSTRLEN(m)))
 
 //void conn_rm_dirty(conn_t *c) {
 //    dlist_node *dn;
@@ -430,22 +427,31 @@ static void reply_line(conn_t *c, int state, const char *fmt, ...) {
 //            word, j->rec.id, j->rec.body_size - 2);
 //}
 
-//static void _skip(conn_t *c, int n, char *line, int len) {
-//    /* Invert the meaning of in_job_read while throwing away data -- 
-//     * it counts the bytes that remain to be thrown away. */
-//    c->in_job = NULL;
-//    c->in_job_read = n;
-//    fill_extra_data(c);
-//
-//    if (c->in_job_read == 0) return reply(c, line, len, STATE_SENDWORD);
-//
-//    c->reply = line;
-//    c->reply_len = len;
-//    c->reply_sent = 0;
-//    c->state = STATE_BITBUCKET;
-//    return;
-//}
-//
+
+#define skip_and_reply_msg(c, n, m) \
+    skip_and_reply(c, n, m, CONSTSTRLEN(m))
+
+/* Skip `n' bytes job content received, and reply the content
+ * refered in `line' of length of 'len'. */
+static void skip_and_reply(conn_t *c, int n, char *line, int len) {
+    /* Invert the meaning of 'in_job_read' while throwing away data
+     * -- it counts the bytes that remain to be thrown away. */
+    c->in_job = NULL;
+    c->in_job_read = n;
+    fill_extra_data(c);
+
+    if (c->in_job_read == 0) {
+        return reply(c, line, len, STATE_SENDWORD);
+    }
+
+    /* we enter bit-bucket mode */
+    c->reply = line;
+    c->reply_len = len;
+    c->reply_sent = 0;
+    c->state = STATE_BITBUCKET; 
+    return;
+}
+
 //conn_t *conn_remove_waiting(conn_t *c) {
 //    tube_t *t;
 //    size_t  i;
@@ -638,7 +644,7 @@ static int scan_eol(const char *s, int size) {
     return 0;
 }
 
-/* Read a priority value from the given buffer and place it in pri.
+/* Read a priority value from the given buffer and place it in 'pri'.
  * Update `end' to point to the address after the last character
  * consumed. `pri' and `end' can be NULL. If they are both NULL,
  * read_pri() will do the conversion and return the status code 
@@ -675,7 +681,9 @@ static int read_delay(int64_t *delay, const char *buf, char **end) {
     uint32_t delay_sec;
 
     ret = read_pri(&delay_sec, buf, end);
-    if (ret) return ret; /* some error */
+    if (ret < 0) {
+        return ret; /* some error */
+    }
     *delay = ((int64_t)delay_sec) * 1000000;
     return 0;
 }
@@ -815,18 +823,15 @@ static void enqueue_incoming_job(conn_t *c) {
 
     /* we have a complete job, so let's stick it in the pqueue */
     ret = enqueue_job(j, j->rec.delay);
-    if (ret < 0) return reply_msg(c, MSG_INTERNAL_ERROR);
+    if (ret < 0) {
+        job_free(j);
+        return reply_msg(c, MSG_INTERNAL_ERROR);
+    }
 
     ++tasque_srv.global_stat.total_jobs_cnt;
     ++j->tube->stats.total_jobs_cnt;
 
-    if (ret == 0) {
-        return reply_line(c, STATE_SENDWORD, MSG_INSERTED_FMT,
-            j->rec.id);
-    }
-
-//    bury_job(j);
-    return reply_line(c, STATE_SENDWORD, MSG_BURIED_FMT, j->rec.id);
+    return reply_line(c, STATE_SENDWORD, MSG_INSERTED_FMT,j->rec.id);
 }
 
 
@@ -935,23 +940,24 @@ static void do_cmd(conn_t *c) {
     switch (type) {
     case OP_PUT:
         ret = read_pri(&pri, c->cmd + 4, &delay_buf);
-        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        if (ret < 0) return reply_msg(c, MSG_BAD_FORMAT);
 
         ret = read_delay(&delay, delay_buf, &ttr_buf);
-        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        if (ret < 0) return reply_msg(c, MSG_BAD_FORMAT);
         
         ret = read_ttr(&ttr, ttr_buf, &size_buf);
-        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+        if (ret < 0) return reply_msg(c, MSG_BAD_FORMAT);
 
         body_size = strtoul(size_buf, &end_buf, 10);
         if (errno) return reply_msg(c, MSG_BAD_FORMAT);
 
         ++tasque_srv.op_cnt[type];
 
-//        if (body_size > JOB_DATA_LIMIT) {
-//            /* throw away the job body and responde with JOB_TOO_BIG */
-//            return skip(c, body_size + 2, MSG_JOB_TOO_BIG);
-//        }
+        if (body_size > JOB_DATA_LIMIT) {
+            /* throw away the job body and respond with JOB_TOO_BIG */
+            skip_and_reply_msg(c, body_size + 2, MSG_JOB_TOO_BIG);
+            return;
+        }
 
         /* don't allow trailing garbage */
         if (end_buf[0] != '\0') return reply_msg(c, MSG_BAD_FORMAT);
@@ -962,11 +968,12 @@ static void do_cmd(conn_t *c) {
         }
 
         c->in_job = job_create(pri, delay, ttr, body_size + 2, c->use, 0);
-//        if (!c->in_job) {
-//            /* throw away the job body and respond with OUT_OF_MEMORY */
-//            fprintf(stderr, "server error: " MSG_OUT_OF_MEMORY);
-//            return skip(c, body_size + 2, MSG_OUT_OF_MEMORY);
-//        }
+        if (!c->in_job) {
+            /* throw away the job body and respond with OUT_OF_MEMORY */
+            fprintf(stderr, "server error: " MSG_OUT_OF_MEMORY);
+            skip_and_reply_msg(c, body_size + 2, MSG_OUT_OF_MEMORY);
+            return;
+        }
         fill_extra_data(c);
 
         /* it's possible we already have a complete job */
@@ -1149,9 +1156,9 @@ static void do_cmd(conn_t *c) {
 }
 
 static void handle_client(void *arg, int ev) {
-    conn_t *c = (conn_t *)arg;
-    int r;
+    int r, to_read;
     job_t *j;
+    conn_t *c = (conn_t *)arg;
 
     if (ev == EVENT_HUP) {
         conn_close(c);
@@ -1166,6 +1173,7 @@ static void handle_client(void *arg, int ev) {
         if (r < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK ||
                     errno == EINTR) {
+                /* just continue */
                 return;
             }
             conn_close(c);
@@ -1175,11 +1183,13 @@ static void handle_client(void *arg, int ev) {
         }
 
         c->cmd_read += r; /* we got some bytes */
-
         c->cmd_len = scan_eol(c->cmd, c->cmd_read);
 
         /* when c->cmd_len > 0, we have a complete command */
-        if (c->cmd_len) return do_cmd(c);
+        if (c->cmd_len) {
+            return do_cmd(c);
+        }
+        /* command line too long */
         if (c->cmd_read == LINE_BUF_SIZE) {
             c->cmd_read = 0;    /* discard the input so far */
             return reply_msg(c, MSG_BAD_FORMAT);
@@ -1194,6 +1204,7 @@ static void handle_client(void *arg, int ev) {
         if (r == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK ||
                     errno == EINTR) {
+                /* just continue */
                 return;
             }
             return conn_close(c);
@@ -1203,13 +1214,32 @@ static void handle_client(void *arg, int ev) {
         c->in_job_read += r; /* we got some bytes */
 
         if (c->in_job_read == j->rec.body_size) {
+            /* we've got a complete job content */
             return enqueue_incoming_job(c);
         }
         
         /* continue waiting for imcomplete job data */
         break;
     case STATE_BITBUCKET:
-        /* XXX */
+        /* Invert the meaning of 'in_job_read' while throwing
+         * away data -- it counts the bytes that remain to 
+         * be thrown away. */
+        to_read = min(c->in_job_read, BUCKET_BUF_SIZE);
+        r = read(c->sock.fd, bucket, to_read);
+        if (r < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                    errno == EINTR) {
+                /* just continue */
+                return;
+            }
+        } else if (r == 0) {
+            return conn_close(c); /* client hung up the connection */
+        }
+        c->in_job_read -= r; /* we got some bytes */
+
+        if (c->in_job_read == 0) {
+            return reply(c, c->reply, c->reply_len, STATE_SENDWORD);
+        }
         break;
     case STATE_SENDWORD:
         r = write(c->sock.fd, c->reply + c->reply_sent, 
