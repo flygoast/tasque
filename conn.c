@@ -23,8 +23,6 @@
 
 #define SAFETY_MARGIN           1000000         /* 1 second */
 #define URGENT_THRESHOLD        1024
-
-/* job body cannot beyond this limit of length */
 #define JOB_DATA_LIMIT     ((1 << 16) - 1)
 
 #define NAME_CHARS  \
@@ -56,7 +54,7 @@
 #define CMD_QUIT                "quit"
 #define CMD_PAUSE_TUBE          "pause-tube"
 
-#define CONSTSTRLEN(m)  (sizeof(m) - 1)
+#define CONSTSTRLEN(m)              (sizeof(m) - 1)
 
 #define CMD_PEEK_READY_LEN          CONSTSTRLEN(CMD_PEEK_READY)
 #define CMD_PEEK_DELAYED_LEN        CONSTSTRLEN(CMD_PEEK_DELAYED)
@@ -88,8 +86,8 @@
 #define MSG_RELEASED                "RELEASED\r\n"
 #define MSG_BURIED                  "BURIED\r\n"
 #define MSG_TOUCHED                 "TOUCHED\r\n"
-#define MSG_BURIED_FMT              "BURIED %"PRIu64"\r\n"
-#define MSG_INSERTED_FMT            "INSERTED %"PRIu64"\r\n"
+#define MSG_BURIED_FMT              "BURIED %ld\r\n"
+#define MSG_INSERTED_FMT            "INSERTED %ld\r\n"
 #define MSG_NOT_IGNORED             "NOT_IGNORED\r\n"
 
 #define MSG_NOTFOUND_LEN            CONSTSTRLEN(MSG_NOTFOUND)
@@ -810,8 +808,8 @@ static void enqueue_incoming_job(conn_t *c) {
     }
 
     if (tasque_srv.verbose >= 2) {
-        printf("<%s:%d job %"PRIu64"\n", c->remote_ip, 
-                c->remote_port, j->rec.id);
+        printf("<%s:%d job %ld\n", 
+                c->remote_ip, c->remote_port, (long)j->rec.id);
     }
 
     if (tasque_srv.drain_mode) {
