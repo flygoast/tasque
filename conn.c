@@ -61,7 +61,7 @@
 #define CMD_PEEK_BURIED_LEN         CONSTSTRLEN(CMD_PEEK_BURIED)
 #define CMD_PEEKJOB_LEN             CONSTSTRLEN(CMD_PEEKJOB)
 #define CMD_RESERVE_LEN             CONSTSTRLEN(CMD_RESERVE)
-#define CMD_RESERVER_TIMEOUT_LEN    CONSTSTRLEN(CMD_RESERVE_TIMEOUT)
+#define CMD_RESERVE_TIMEOUT_LEN     CONSTSTRLEN(CMD_RESERVE_TIMEOUT)
 #define CMD_DELETE_LEN              CONSTSTRLEN(CMD_DELETE)
 #define CMD_BURY_LEN                CONSTSTRLEN(CMD_BURY)
 #define CMD_KICK_LEN                CONSTSTRLEN(CMD_KICK)
@@ -294,49 +294,13 @@ static void on_ignore(set_t *s, void *arg, size_t pos) {
     tube_dref(t);
 }
 
-//static int conn_has_reserved_job(conn_t *c) {
-//    return dlist_length(&c->reserved_jobs) != 0;
-//}
-
 static void conn_reset(conn_t *c) {
     event_regis(&tasque_srv.evt, &c->sock, EVENT_RD);
     c->reply_sent = 0;
     c->state = STATE_WANTCOMMAND;
 }
 
-//static void conn_enqueue_waiting(conn_t *c) {
-//    tube_t *t;
-//    size_t i;
-//
-//    ++tasque_srv.global_stat.waiting_cnt;
-//    c->type |= CONN_TYPE_WAITING;
-//
-//    for (i = 0; i < c->watch.used; ++i) {
-//        t = c->watch.items[i];
-//        ++t->stats.waiting_cnt;
-//        set_append(&t->waiting_conns, c);
-//    }
-//}
 
-//static void wait_for_job(conn_t *c, int timeout) {
-//    c->state = STATE_WAIT;
-//    conn_enqueue_waiting(c); 
-//
-//    /* Set the pending timeout to the requested timeout amount */
-//    c->pending_timeout = timeout;
-//
-//    c->ev = EVENT_HUP;
-//    c->tickat = conn_tickat(c);
-//    if (c->tickpos > -1) {
-//        heap_remove(&tasque_srv.conns, c->tickpos);
-//    }
-//
-//    if (c->tickat) {
-//        heap_insert(&tasque_srv.conns, c);
-//    }
-//
-//    dlist_add_node_head(&tasque_srv.dirty_conns, c);
-//}
 
 /* Copy up to body_size trailing bytes into the job, then the rest
  * into the cmd buffer. If c->in_job exists, this assume that
@@ -447,65 +411,115 @@ static void skip_and_reply(conn_t *c, int n, char *line, int len) {
     return;
 }
 
-//conn_t *conn_remove_waiting(conn_t *c) {
-//    tube_t *t;
-//    size_t  i;
-//
-//    if (!conn_waiting(c)) return NULL;
-//
-//    c->type &= ~CONN_TYPE_WAITING;
-//    --tasque_srv.global_stat.waiting_cnt;
-//
-//    for (i = 0; i < c->watch.used; ++i) {
-//        t = (tube_t *)c->watch.items[i];
-//        --t->stats.waiting_cnt;
-//        set_remove(&t->waiting_conns, c);
-//    }
-//    return c;
-//}
-//
-//int64_t conn_tickat(conn_t *c) {
-//    int margin = 0, should_timeout = 0;
-//    int64_t t = INT64_MAX;
-//
-//    if (conn_waiting(c)) {  /* XXX: for what ? */
-//        margin = SAFETY_MARGIN;
-//    }
-//
-//    if (conn_has_reserved_job(c)) {
-//        t = conn_soonest_job(c)->rec.deadline_at - ustime() - margin;
-//        should_timeout = 1;
-//    }
-//
-//    if (c->pending_timeout >= 0) {
-//        t = min(t, (int64_t)c->pending_timeout * 1000000);
-//    }
-//
-//    if (should_timeout) {
-//        return ustime() + t;
-//    }
-//    return 0;
-//}
-//
-//job_t *conn_soonest_job(conn_t *c) {
-//    job_t *j = NULL;
-//    job_t *soonest = c->soonest_job;
-//
-//    if (!soonest) {
-//        dlist_iter iter;
-//        dlist_node *node;
-//        dlist_rewind(&c->reserved_jobs, &iter);
-//
-//        while ((node = dlist_next(&iter))) {
-//            j = (job_t *)node->value;
-//            if (j->rec.deadline_at <= (soonest ? : j)->rec.deadline_at) {
-//                soonest = j;
-//            }
-//        }
-//    }
-//    c->soonest_job = soonest;
-//    return soonest;
-//}
+#define conn_is_waiting(c)  ((c)->type & CONN_TYPE_WAITING)
+
+static int conn_has_reserved_job(conn_t *c) {
+    return dlist_length(&c->reserved_jobs) != 0;
+}
+
+/* remove this connection to associated tubes' waiting set */
+static void conn_remove_waiting(conn_t *c) {
+    tube_t *t;
+    size_t  i;
+
+    if (!conn_is_waiting(c)) return;
+
+    c->type &= ~CONN_TYPE_WAITING;
+    --tasque_srv.global_stat.waiting_cnt;
+
+    for (i = 0; i < c->watch.used; ++i) {
+        t = (tube_t *)c->watch.items[i];
+        --t->stats.waiting_cnt;
+        set_remove(&t->waiting_conns, c);
+    }
+}
+
+
+/* add this connection to associated tubes' waiting set */
+static void conn_enqueue_waiting(conn_t *c) {
+    tube_t *t;
+    size_t i;
+
+    ++tasque_srv.global_stat.waiting_cnt;
+    c->type |= CONN_TYPE_WAITING;
+
+    for (i = 0; i < c->watch.used; ++i) {
+        t = c->watch.items[i];
+        ++t->stats.waiting_cnt;
+        set_append(&t->waiting_conns, c);
+    }
+}
+
+static void wait_for_job(conn_t *c, int timeout) {
+    c->state = STATE_WAIT;
+    /* add this connection to associated tubes' waiting set */
+    conn_enqueue_waiting(c); 
+
+    /* Set the pending timeout to the requested timeout amount */
+    c->pending_timeout = timeout;
+
+    /* Only care if the connection hang up. */
+    c->ev = EVENT_HUP;
+    c->tickat = conn_tickat(c);
+
+    /* delete old tick event */
+    if (c->tickpos > -1) {
+        heap_remove(&tasque_srv.conns, c->tickpos);
+    }
+
+    if (c->tickat) {
+        heap_insert(&tasque_srv.conns, c);
+    }
+    assert(dlist_add_node_head(&tasque_srv.dirty_conns, c) != NULL);
+}
+
+/* the connection should be waked up at some tick */
+int64_t conn_tickat(conn_t *c) {
+    int margin = 0, should_timeout = 0;
+    int64_t t = INT64_MAX;
+
+    if (conn_is_waiting(c)) {
+        margin = SAFETY_MARGIN;
+    }
+
+    if (conn_has_reserved_job(c)) {
+        t = conn_soonest_reserved_job(c)->rec.deadline_at 
+            - ustime() - margin;
+        should_timeout = 1;
+    }
+
+    if (c->pending_timeout >= 0) {
+        t = min(t, (int64_t)c->pending_timeout * 1000000);
+        should_timeout = 1;
+    }
+
+    if (should_timeout) {
+        return ustime() + t;
+    }
+    return 0;
+}
+
+/* return the reserved job with the earlist deadline,
+ * or NULL if there is no reserved job */
+job_t *conn_soonest_reserved_job(conn_t *c) {
+    job_t *j = NULL;
+    job_t *soonest = c->soonest_job;
+
+    if (!soonest) {
+        dlist_iter iter;
+        dlist_node *node;
+        dlist_rewind(&c->reserved_jobs, &iter);
+
+        while ((node = dlist_next(&iter))) {
+            j = (job_t *)node->value;
+            if (j->rec.deadline_at <= (soonest ? : j)->rec.deadline_at) {
+                soonest = j;
+            }
+        }
+    }
+    c->soonest_job = soonest;
+    return soonest;
+}
 
 //int conn_less(void *conn_a, void *conn_b) {
 //    return ((conn_t *)conn_a)->tickat < ((conn_t *)conn_b)->tickat;
@@ -554,22 +568,24 @@ void conn_set_worker(conn_t *c) {
     ++tasque_srv.cur_worker_cnt;    /* stats */
 }
 
-//int conn_deadline_soon(conn_t *c) {
-//    int64_t t = ustime();
-//    job_t *j = conn_soonest_job(c);
-//    return j && t >= j->rec.deadline_at - SAFETY_MARGIN;
-//}
-//
-//int conn_ready(conn_t *c) {
-//    size_t  i;
-//
-//    for (i = 0; i < c->watch.used; ++i) {
-//        if (((tube_t*)c->watch.items[i])->ready_jobs.len) {
-//            return 1;
-//        }
-//    }
-//    return 0;
-//}
+/* return true if `c' has a reserved job with less than one second
+ * until its deadline. */
+int conn_deadline_soon(conn_t *c) {
+    int64_t t = ustime();
+    job_t *j = conn_soonest_reserved_job(c);
+    return j && t >= j->rec.deadline_at - SAFETY_MARGIN;
+}
+
+int conn_has_ready_job(conn_t *c) {
+    size_t  i;
+
+    for (i = 0; i < c->watch.used; ++i) {
+        if (((tube_t*)c->watch.items[i])->ready_jobs.len) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void conn_free(conn_t *c) {
     if (tasque_srv.verbose) {
@@ -702,58 +718,67 @@ static int read_ttr(int64_t *ttr, const char *buf, char **end) {
 //    return 0;
 //}
 
-//static void reserve_job(conn_t *c, job_t *j) {
-//    j->rec.deadline_at = ustime() + j->rec.ttr;
-//    ++tasque_srv.global_stat.reserved_cnt;
-//    ++j->tube->stat.reserved_cnt;
-//    ++j->rec.reserve_cnt;
-//    j->rec.state = JOB_RESERVED;
-//
-//    dlist_add_node_head(&c->reserved_jobs, j);
-//    j->reserver = c;
-//    if (c->soonest_job && 
-//            j->rec.deadline_at < c->soonest_job->rec.deadline_at) {
-//        c->soonest_job = j;
-//    }
-//
-//    return reply_job(c, j, MSG_RESERVED);
-//}
-//
-//static void process_queue() {
-//    job_t *j;
-//    int64_t now = ustime();
-//    while ((j = next_eligible_job(now))) {
-//        heap_remove(&j->tube->ready_jobs, j->heap_index);
-//        --tasque_srv.ready_cnt;
-//        if (j->rec.pri < URGENT_THRESHOLD) {
-//            --tasque_srv.global_stat.urgent_cnt;
-//            --j->tube->stat.urgent_cnt;
-//        }
-//        reserve_job(conn_remove_waiting(set_take(&j->tube->waiting)), j);
-//    }
-//}
-//
-//static job_t *next_eligible_job(int64_t now) {
-//    tube_t *t;
-//    size_t i;
-//    job_t *j = NULL, *candidate;
-//
-//    for (i = 0; i < tasque_srv.tubes.used; ++i) {
-//        t = tasque_srv.tubes.items[i];
-//        if (t->pause) {
-//            if (t->deadline_at > now) continue;
-//            t->pause = 0;
-//        }
-//
-//        if (t->waiting_conns.used && t->ready_jobs.len) {
-//            candidate = t->ready_jobs.data[0];
-//            if (!j || job_pri_less(candidate, j)) {
-//                j = candidate;
-//            }
-//        }
-//    }
-//    return j;
-//}
+/****************************************/
+/* TODO */
+static void reserve_job(conn_t *c, job_t *j) {
+    j->rec.deadline_at = ustime() + j->rec.ttr;
+    ++tasque_srv.global_stat.reserved_cnt;
+    ++j->tube->stat.reserved_cnt;
+    ++j->rec.reserve_cnt;
+    j->rec.state = JOB_RESERVED;
+
+    dlist_add_node_head(&c->reserved_jobs, j);
+    j->reserver = c;
+    if (c->soonest_job && 
+            j->rec.deadline_at < c->soonest_job->rec.deadline_at) {
+        c->soonest_job = j;
+    }
+
+    return reply_job(c, j, MSG_RESERVED);
+}
+
+static job_t *next_eligible_job(int64_t now) {
+    tube_t *t;
+    size_t i;
+    job_t *j = NULL, *candidate;
+
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        if (t->pause) {
+            if (t->deadline_at > now) continue;
+            t->pause = 0;
+        }
+
+        if (t->waiting_conns.used && t->ready_jobs.len) {
+            candidate = t->ready_jobs.data[0];
+            if (!j || job_pri_less(candidate, j)) {
+                j = candidate;
+            }
+        }
+    }
+    return j;
+}
+
+static void process_queue() {
+    job_t *j;
+    conn_t *c;
+    int64_t now = ustime();
+    while ((j = next_eligible_job(now))) {
+        heap_remove(&j->tube->ready_jobs, j->heap_index);
+        --tasque_srv.ready_cnt;
+        if (j->rec.pri < URGENT_THRESHOLD) {
+            --tasque_srv.global_stat.urgent_cnt;
+            --j->tube->stat.urgent_cnt;
+        }
+
+        c = set_take(&j->tube->waiting_conns);
+        conn_remove_waiting(c);
+        if (conn_is_waiting) {
+            reserve_job(c, j);
+        }
+    }
+}
+
 //
 //static int bury_job(job_t *j) {
 //    if (!dlist_add_node_head(&j->tube->buried_jobs, j)) {
@@ -910,11 +935,12 @@ static void enqueue_incoming_job(conn_t *c) {
 
 static void do_cmd(conn_t *c) {
     unsigned char type;
-    int ret;
+    int ret, timeout = -1;
     uint32_t pri, body_size;
 //    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
     char *size_buf, *delay_buf, *ttr_buf, *end_buf;
     int64_t delay, ttr;
+
 //    uint64_t id;
 //    tube_t *t = NULL;
 
@@ -1042,29 +1068,29 @@ static void do_cmd(conn_t *c) {
 //        }
 //        reply_job(c, j, MSG_FOUND);
 //        break;
-//    case OP_RESERVE_TIMEOUT:
-//        timeout = strtol(c->cmd + CMD_RESERVE_TIMEOUT_LEN, &end_buf, 10);
-//        if (errno) {
-//            return reply_msg(c, MSG_BAD_FORMAT);
-//        }
-//        /* fall through */
-//    case OP_RESERVE:
-//        /* don't allow trailing garbage */
-//        if (type == OP_RESERVE && c->cmd_len != CMD_RESERVE_LEN + 2) {
-//            return reply_msg(c, MSG_BAD_FORMAT);
-//        }
-//
-//        ++tasque_srv.op_cnt[type];
-//        conn_set_worker(c);
-//
-//        if (conn_deadline_soon(c) && !conn_ready(c)) {
-//            return reply_msg(c, MSG_DEADLINE_SOON);
-//        }
-//
-//        /* try to get a new job for this guy */
-//        wait_for_job(c, timeout);
-//        process_queue();
-//        break;
+    case OP_RESERVE_TIMEOUT:
+        timeout = strtol(c->cmd + CMD_RESERVE_TIMEOUT_LEN, &end_buf, 10);
+        if (errno) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        /* fall through */
+    case OP_RESERVE:
+        /* don't allow trailing garbage */
+        if (type == OP_RESERVE && c->cmd_len != CMD_RESERVE_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+
+        ++tasque_srv.op_cnt[type];
+        conn_set_worker(c);
+
+        if (conn_deadline_soon(c) && !conn_has_ready_job(c)) {
+            return reply_msg(c, MSG_DEADLINE_SOON);
+        }
+
+        /* try to get a new job for this guy */
+        wait_for_job(c, timeout);
+        process_queue();
+        break;
 //    case OP_DELETE:
 //        id = strtoull(c->cmd + CMD_DELETE_LEN, &end_buf, 10);
 //        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
