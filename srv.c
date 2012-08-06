@@ -53,6 +53,7 @@ void srv_init() {
     tasque_srv.port = DEFAULT_PORT;
     tasque_srv.host = strdup("0.0.0.0");
     tasque_srv.user = NULL;
+    tasque_srv.next_job_id = 1;
 
     set_init(&tasque_srv.tubes, NULL, NULL);
 

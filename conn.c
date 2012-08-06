@@ -389,11 +389,6 @@ static void reply(conn_t *c, char *line, int len, int state) {
         return;
     }
 
-    if (!dlist_add_node_head(&tasque_srv.dirty_conns, c)) {
-        conn_close(c);
-        return;
-    }
-
     c->reply = line;
     c->reply_len = len;
     c->reply_sent = 0;
@@ -1152,6 +1147,8 @@ static void do_cmd(conn_t *c) {
 //
 //        i = kick_jobs(c->use, count);
 //        return reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
+    default:
+        return reply_msg(c, MSG_UNKNOWN_COMMAND);
     }
 }
 
@@ -1187,7 +1184,9 @@ static void handle_client(void *arg, int ev) {
 
         /* when c->cmd_len > 0, we have a complete command */
         if (c->cmd_len) {
-            return do_cmd(c);
+            do_cmd(c);
+            fill_extra_data(c);
+            return;
         }
         /* command line too long */
         if (c->cmd_read == LINE_BUF_SIZE) {
