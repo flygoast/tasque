@@ -23,7 +23,7 @@
 
 #define SAFETY_MARGIN           1000000         /* 1 second */
 #define URGENT_THRESHOLD        1024
-#define JOB_DATA_LIMIT     ((1 << 16) - 1)
+#define JOB_DATA_LIMIT          ((1 << 16) - 1)
 
 #define NAME_CHARS  \
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    \

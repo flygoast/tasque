@@ -151,7 +151,11 @@ int hash_delete(hash_t *ht, const void *key) {
     unsigned int index;
     hash_entry_t *he, *prev;
 
-    index = hash_func(key) % ht->slots;
+    if (!ht->hash_fn) {
+        index = hash_func(key) % ht->slots;
+    } else {
+        index = ht->hash_fn(key) % ht->slots;
+    }
 
     if ((he = ht->data[index])) {
         prev = NULL;
