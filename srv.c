@@ -69,6 +69,8 @@ void srv_init() {
         fprintf(stderr, "heap_init failed\n");
         exit(1);
     }
+    tasque_srv.conns.less = conn_less;
+    tasque_srv.conns.record = conn_record;
 
     if (hash_init(&tasque_srv.all_jobs, INIT_JOB_NUM) != 0) {
         fprintf(stderr, "hash_init failed\n");

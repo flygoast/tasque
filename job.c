@@ -51,17 +51,17 @@ void job_set_heap_pos(void *arg, int pos) {
 int job_pri_less(void *ax, void *bx) {
     job_t *a = (job_t *)ax; 
     job_t *b = (job_t *)bx;
-    if (a->rec.pri < b->rec.pri) {
-        return 1;
-    }
-    return 0;
+    if (a->rec.pri < b->rec.pri) return 1;
+    if (a->rec.pri > b->rec.pri) return 0;
+    return a->rec.id < b->rec.id;
 }
 
 int job_delay_less(void *ax, void *bx) {
     job_t *a = (job_t *)ax; 
     job_t *b = (job_t *)bx;
     if (a->rec.deadline_at < b->rec.deadline_at) return 1;
-    return 0;
+    if (a->rec.deadline_at > b->rec.deadline_at) return 0;
+    return a->rec.id < b->rec.id;
 }
 
 job_t *job_copy(job_t *j) {

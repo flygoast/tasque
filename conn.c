@@ -282,6 +282,10 @@ static unsigned char which_cmd(conn_t *c) {
     return OP_UNKNOWN;
 }
 
+/* --------- private function declares ------------ */
+static void reserve_job(conn_t *c, job_t *j);
+static job_t *next_eligible_job(int64_t now);
+
 static void on_watch(set_t *s, void *arg, size_t pos) {
     tube_t *t = (tube_t *)arg;
     tube_iref(t);
@@ -296,6 +300,10 @@ static void on_ignore(set_t *s, void *arg, size_t pos) {
 
 static void conn_reset(conn_t *c) {
     event_regis(&tasque_srv.evt, &c->sock, EVENT_RD);
+    if (c->out_job && c->out_job->rec.state == JOB_COPY) {
+        job_free(c->out_job);
+    }
+    c->out_job = NULL;
     c->reply_sent = 0;
     c->state = STATE_WANTCOMMAND;
 }
@@ -464,6 +472,7 @@ static void wait_for_job(conn_t *c, int timeout) {
     /* delete old tick event */
     if (c->tickpos > -1) {
         heap_remove(&tasque_srv.conns, c->tickpos);
+        c->tickpos = -1;
     }
 
     if (c->tickat) {
@@ -520,15 +529,13 @@ int64_t conn_tickat(conn_t *c) {
     return 0;
 }
 
+int conn_less(void *conn_a, void *conn_b) {
+    return ((conn_t *)conn_a)->tickat < ((conn_t *)conn_b)->tickat;
+}
 
-
-//int conn_less(void *conn_a, void *conn_b) {
-//    return ((conn_t *)conn_a)->tickat < ((conn_t *)conn_b)->tickat;
-//}
-//
-//void conn_record(void *conn, int pos) {
-//    ((conn_t *)conn)->tickpos = pos;
-//}
+void conn_record(void *conn, int pos) {
+    ((conn_t *)conn)->tickpos = pos;
+}
 
 conn_t *conn_create(int fd, char start_state, tube_t *use,
         tube_t *watch) {
@@ -623,6 +630,7 @@ void conn_free(conn_t *c) {
 
     if (c->tickpos > -1) {
         heap_remove(&tasque_srv.conns, c->tickpos);
+        c->tickpos = -1;
     }
 
     /* DELETE dirty */
@@ -640,9 +648,133 @@ void conn_close(conn_t *c) {
     conn_free(c);
 }
 
+static void process_queue() {
+    job_t *j;
+    conn_t *c;
+    int64_t now = ustime();
+    while ((j = next_eligible_job(now))) {
+        heap_remove(&j->tube->ready_jobs, j->heap_index);
+        --tasque_srv.ready_cnt;
+        if (j->rec.pri < URGENT_THRESHOLD) {
+            --tasque_srv.global_stat.urgent_cnt;
+            --j->tube->stats.urgent_cnt;
+        }
 
+        c = set_take(&j->tube->waiting_conns);
+        conn_remove_waiting(c);
+        reserve_job(c, j);
+    }
+}
+
+static void remove_reserved_job(conn_t *c, job_t *j) {
+    dlist_node *dn;
+    dn = dlist_search_key(&c->reserved_jobs, j);
+    if (!dn) return;
+    dlist_delete_node(&c->reserved_jobs, dn);
+
+    --tasque_srv.global_stat.reserved_cnt;
+    --j->tube->stats.reserved_cnt;
+    j->reserver = NULL;
+    c->soonest_job = NULL;
+}
+
+static int enqueue_job(job_t *j, int64_t delay) {
+    int ret;
+    j->reserver = NULL;
+
+    if (delay) {
+        j->rec.deadline_at = ustime() + delay;
+        ret = heap_insert(&j->tube->delay_jobs, j);
+        if (ret < 0) return -1;
+        j->rec.state = JOB_DELAYED;
+    } else {
+        ret = heap_insert(&j->tube->ready_jobs, j);
+        if (ret < 0) return -1;
+        j->rec.state = JOB_READY;
+        ++tasque_srv.ready_cnt;
+        if (j->rec.pri < URGENT_THRESHOLD) {
+            ++tasque_srv.global_stat.urgent_cnt;
+            ++j->tube->stats.urgent_cnt;
+        }
+    }
+
+    process_queue();
+    return 0;
+}
+
+/* There are three reasons this function may be called. We need 
+ * to check for all of them.
+ *
+ * 1. A reserved job has run out of time.
+ * 2. A waiting client's reserved job has entered the safety margin.
+ * 3. A waiting client's requested timeout has occured.
+ *
+ * If any of these happen, we must do the appropriate thing. */
+static void conn_timeout(conn_t *c) {
+    int ret, should_timeout = 0;
+    job_t *j;
+
+    /* Check if the client was trying to reserve a job. */
+    if (conn_is_waiting(c) && conn_deadline_soon(c)) {
+        should_timeout = 1;
+    }
+
+    /* Check if any reserved jobs have run out of time. We should
+     * do this whether or not the client is waiting for a new
+     * reservation. */
+    while ((j = conn_soonest_reserved_job(c))) {
+        if (j->rec.deadline_at > ustime()) break;
+
+        /* This job is in the middle of being written out. If we
+         * return it to the ready queue, someone might free it
+         * before we finish writing it out to the socket. So we'll
+         * copy it here and free the copy when it's done sending,
+         * in conn_reset(). */
+        if (j == c->out_job) {
+            c->out_job = job_copy(c->out_job);
+        }
+        ++tasque_srv.timeout_cnt;   /* stats */
+        ++j->rec.timeout_cnt;
+        remove_reserved_job(c, j);
+        ret = enqueue_job(j, 0);
+        if (ret < 0) {
+            /* TODO */
+        }
+
+        c->tickat = conn_tickat(c);
+        if (c->tickpos > -1) {
+            heap_remove(&tasque_srv.conns, c->tickpos);
+            c->tickpos = -1;
+        }
+        if (c->tickat) {
+            heap_insert(&tasque_srv.conns, c);
+        }
+    }
+
+    if (should_timeout) {
+        conn_remove_waiting(c);
+        return reply_msg(c, MSG_DEADLINE_SOON);
+    } else if (conn_is_waiting(c) && c->pending_timeout >= 0) {
+        conn_remove_waiting(c);
+        c->pending_timeout = -1;
+        return reply_msg(c, MSG_TIMED_OUT);
+    }
+}
+
+/* cron function every 10 ms */
 void conn_tick(void *tickarg, int ev) {
-    /* do nothing */
+    int64_t now = ustime();
+
+    /* process tick event of some connections */
+    while (tasque_srv.conns.len) {
+        conn_t *c = tasque_srv.conns.data[0];
+        if (c->tickat > now) {
+            break;
+        }
+        heap_remove(&tasque_srv.conns, 0);
+        c->tickpos = -1;
+        conn_timeout(c);
+    }
 }
 
 /* Always returns at least 2 if a match is found. Return 0 if no match. */
@@ -758,23 +890,7 @@ static job_t *next_eligible_job(int64_t now) {
     return j;
 }
 
-static void process_queue() {
-    job_t *j;
-    conn_t *c;
-    int64_t now = ustime();
-    while ((j = next_eligible_job(now))) {
-        heap_remove(&j->tube->ready_jobs, j->heap_index);
-        --tasque_srv.ready_cnt;
-        if (j->rec.pri < URGENT_THRESHOLD) {
-            --tasque_srv.global_stat.urgent_cnt;
-            --j->tube->stats.urgent_cnt;
-        }
 
-        c = set_take(&j->tube->waiting_conns);
-        conn_remove_waiting(c);
-        reserve_job(c, j);
-    }
-}
 
 //
 //static int bury_job(job_t *j) {
@@ -791,29 +907,7 @@ static void process_queue() {
 //}
 
 
-static int enqueue_job(job_t *j, int64_t delay) {
-    int ret;
-    j->reserver = NULL;
 
-    if (delay) {
-        j->rec.deadline_at = ustime() + delay;
-        ret = heap_insert(&j->tube->delay_jobs, j);
-        if (ret < 0) return -1;
-        j->rec.state = JOB_DELAYED;
-    } else {
-        ret = heap_insert(&j->tube->ready_jobs, j);
-        if (ret < 0) return -1;
-        j->rec.state = JOB_READY;
-        ++tasque_srv.ready_cnt;
-        if (j->rec.pri < URGENT_THRESHOLD) {
-            ++tasque_srv.global_stat.urgent_cnt;
-            ++j->tube->stats.urgent_cnt;
-        }
-    }
-
-//    process_queue();
-    return 0;
-}
 
 static void enqueue_incoming_job(conn_t *c) {
     int ret;
@@ -851,22 +945,13 @@ static void enqueue_incoming_job(conn_t *c) {
     return reply_line(c, STATE_SENDWORD, MSG_INSERTED_FMT,j->rec.id);
 }
 
-
-//static job_t *remove_reserved_job(conn_t *c, job_t *j) {
-//    dlist_node *dn;
-//    if (!j || j->rec.state != JOB_BURIED) return NULL;
-//    dn = dlist_search_key(&tasque_srv.buried_jobs, j);
-//    if (!dn) return NULL;
-//    dlist_delete_node(&tasque_srv.buried_jobs, dn);
-//    if (j) {
-//        --tasque_srv.global_stat.reserved_cnt;
-//        --j->tube->stat.reserved_cnt;
-//        j->reserver = NULL;
-//    }
-//    c->soonest_job = NULL;
-//    return j;
+//static int conn_reserved_job(conn_t *c, job_t *j) {
+//    return (j && j->reserver == c && j->rec.state == JOB_RESERVED) ?
+//        1 : 0;
 //}
-//
+
+
+
 //static job_t *remove_buried_job(job_t *j) {
 //    dlist_node *dn;
 //    if (!j || j->rec.state != JOB_BURIED) return NULL;
