@@ -12,7 +12,6 @@
 #define CONN_TYPE_PRODUCER  0x1
 #define CONN_TYPE_WORKER    0x2
 #define CONN_TYPE_WAITING   0x4
-#define conn_waiting(c)     ((c)->type & CONN_TYPE_WAITING)
 
 #define TOTAL_OPS               24
 
@@ -60,7 +59,7 @@ void conn_accept(void *sock, int ev);
 void conn_close(conn_t *c);
 void conn_set_producer(conn_t *c);
 void conn_set_worker(conn_t *c);
-job_t *conn_soonest_job(conn_t *c);
+job_t *conn_soonest_reserved_job(conn_t *c);
 int conn_deadline_soon(conn_t *c);
 int conn_ready(conn_t *c);
 int64_t conn_tickat(conn_t *c);

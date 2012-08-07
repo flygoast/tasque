@@ -378,13 +378,13 @@ static void reply_line(conn_t *c, int state, const char *fmt, ...) {
     return reply(c, c->reply_buf, ret, state);
 }
 
-//static void reply_job(conn_t *c, job_t *j, const char *word) {
-//    /* tell this connection which job to send */
-//    c->out_job = j;
-//    c->out_job_sent = 0;
-//    return reply_line(c, STATE_SENDJOB, "%s %" PRIu64 " %u\r\n",
-//            word, j->rec.id, j->rec.body_size - 2);
-//}
+static void reply_job(conn_t *c, job_t *j, const char *word) {
+    /* tell this connection which job to send */
+    c->out_job = j;
+    c->out_job_sent = 0;
+    return reply_line(c, STATE_SENDJOB, "%s %ld %u\r\n",
+            word, j->rec.id, j->rec.body_size - 2);
+}
 
 
 #define skip_and_reply_msg(c, n, m) \
@@ -434,7 +434,6 @@ static void conn_remove_waiting(conn_t *c) {
     }
 }
 
-
 /* add this connection to associated tubes' waiting set */
 static void conn_enqueue_waiting(conn_t *c) {
     tube_t *t;
@@ -473,6 +472,28 @@ static void wait_for_job(conn_t *c, int timeout) {
     assert(dlist_add_node_head(&tasque_srv.dirty_conns, c) != NULL);
 }
 
+/* return the reserved job with the earlist deadline,
+ * or NULL if there is no reserved job */
+job_t *conn_soonest_reserved_job(conn_t *c) {
+    job_t *j = NULL;
+    job_t *soonest = c->soonest_job;
+
+    if (!soonest) {
+        dlist_iter iter;
+        dlist_node *node;
+        dlist_rewind(&c->reserved_jobs, &iter);
+
+        while ((node = dlist_next(&iter))) {
+            j = (job_t *)node->value;
+            if (j->rec.deadline_at <= (soonest ? : j)->rec.deadline_at) {
+                soonest = j;
+            }
+        }
+    }
+    c->soonest_job = soonest;
+    return soonest;
+}
+
 /* the connection should be waked up at some tick */
 int64_t conn_tickat(conn_t *c) {
     int margin = 0, should_timeout = 0;
@@ -499,27 +520,7 @@ int64_t conn_tickat(conn_t *c) {
     return 0;
 }
 
-/* return the reserved job with the earlist deadline,
- * or NULL if there is no reserved job */
-job_t *conn_soonest_reserved_job(conn_t *c) {
-    job_t *j = NULL;
-    job_t *soonest = c->soonest_job;
 
-    if (!soonest) {
-        dlist_iter iter;
-        dlist_node *node;
-        dlist_rewind(&c->reserved_jobs, &iter);
-
-        while ((node = dlist_next(&iter))) {
-            j = (job_t *)node->value;
-            if (j->rec.deadline_at <= (soonest ? : j)->rec.deadline_at) {
-                soonest = j;
-            }
-        }
-    }
-    c->soonest_job = soonest;
-    return soonest;
-}
 
 //int conn_less(void *conn_a, void *conn_b) {
 //    return ((conn_t *)conn_a)->tickat < ((conn_t *)conn_b)->tickat;
@@ -718,16 +719,14 @@ static int read_ttr(int64_t *ttr, const char *buf, char **end) {
 //    return 0;
 //}
 
-/****************************************/
-/* TODO */
 static void reserve_job(conn_t *c, job_t *j) {
     j->rec.deadline_at = ustime() + j->rec.ttr;
     ++tasque_srv.global_stat.reserved_cnt;
-    ++j->tube->stat.reserved_cnt;
+    ++j->tube->stats.reserved_cnt;
     ++j->rec.reserve_cnt;
     j->rec.state = JOB_RESERVED;
 
-    dlist_add_node_head(&c->reserved_jobs, j);
+    assert(dlist_add_node_head(&c->reserved_jobs, j) != NULL);
     j->reserver = c;
     if (c->soonest_job && 
             j->rec.deadline_at < c->soonest_job->rec.deadline_at) {
@@ -768,14 +767,12 @@ static void process_queue() {
         --tasque_srv.ready_cnt;
         if (j->rec.pri < URGENT_THRESHOLD) {
             --tasque_srv.global_stat.urgent_cnt;
-            --j->tube->stat.urgent_cnt;
+            --j->tube->stats.urgent_cnt;
         }
 
         c = set_take(&j->tube->waiting_conns);
         conn_remove_waiting(c);
-        if (conn_is_waiting) {
-            reserve_job(c, j);
-        }
+        reserve_job(c, j);
     }
 }
 
@@ -1182,6 +1179,7 @@ static void handle_client(void *arg, int ev) {
     int r, to_read;
     job_t *j;
     conn_t *c = (conn_t *)arg;
+    struct iovec iov[2];
 
     if (ev == EVENT_HUP) {
         conn_close(c);
@@ -1285,6 +1283,40 @@ static void handle_client(void *arg, int ev) {
             return conn_reset(c);
         }
         /* otherwise we sent an incomplete reply, so just continue */
+        break;
+    case STATE_SENDJOB:
+        j = c->out_job;
+        iov[0].iov_base = (void *)(c->reply + c->reply_sent);
+        iov[0].iov_len = c->reply_len - c->reply_sent;
+        iov[1].iov_base = j->body + c->out_job_sent;
+        iov[1].iov_len = j->rec.body_size - c->out_job_sent;
+
+        r = writev(c->sock.fd, iov, 2);
+        if (r < 0) {
+           if (errno == EAGAIN || errno == EWOULDBLOCK ||
+                    errno == EINTR) {
+                /* just continue */
+                return;
+           }
+        } else if (r == 0) {
+            return conn_close(c);
+        }
+
+        /* update the sent values */
+        c->reply_sent += r;
+        if (c->reply_sent >= c->reply_len) {
+            c->out_job_sent += c->reply_sent - c->reply_len;
+            c->reply_sent = c->reply_len;
+        }
+
+        /* are we done? */
+        if (c->out_job_sent == j->rec.body_size) {
+            return conn_reset(c);
+        }
+        /* otherwise we sent incomplete data, so just keep waiting */
+        break;
+    case STATE_WAIT:
+        /* do nothing */
         break;
     }
 }
