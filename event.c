@@ -86,7 +86,7 @@ void event_loop(event_t *evt) {
     struct epoll_event evs[512];
 
     while (!evt->stop) {
-        r = epoll_wait(evt->epoll_fd, evs, 1, evt->interval);
+        r = epoll_wait(evt->epoll_fd, evs, 512, evt->interval);
 
         if (r < 0 && errno != EINTR) {
             fprintf(stderr, "epoll_wait failed:%s\n", strerror(errno));
