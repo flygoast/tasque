@@ -90,7 +90,7 @@ int hash_init(hash_t *ht, unsigned int slots);
 unsigned long hash_func_int(const void *key);
 
 /* string hash function */
-unsigned long hash_func(const void *key);
+unsigned long hash_func_str(const void *key);
 
 /* destroy a hash table */
 void hash_destroy(hash_t *ht);

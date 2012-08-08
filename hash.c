@@ -19,7 +19,7 @@ static unsigned long next_power(unsigned long size) {
     }
 }
 
-unsigned long hash_func(const void *key) {
+unsigned long hash_func_str(const void *key) {
     unsigned int h = 5381;
     char *ptr = (char *)key;
 
@@ -32,6 +32,16 @@ unsigned long hash_func(const void *key) {
 
 unsigned long hash_func_int(const void *key) {
     return (unsigned long)key;
+}
+
+static unsigned long hash_func(hash_t *ht, const void *key) {
+    unsigned long index;
+    if (!ht->hash_fn) {
+        index = hash_func_str(key) % ht->slots;
+    } else {
+        index = ht->hash_fn(key) % ht->slots;
+    }
+    return index;
 }
 
 /* the foreach function to use with the hash_clear() macro */
@@ -93,11 +103,7 @@ int hash_insert(hash_t *ht, const void *key, const void *val) {
         }
     }
 
-    if (!ht->hash_fn) {
-        hash = hash_func(key);
-    } else {
-        hash = ht->hash_fn(key);
-    }
+    hash = hash_func(ht, key);
     i = hash % ht->slots;
 
     if ((he = ht->data[i])) {
@@ -128,11 +134,10 @@ int hash_insert(hash_t *ht, const void *key, const void *val) {
 
 /* Get an entry in the hash table. */
 void *hash_get_val(hash_t *ht, const void *key) {
-    unsigned int hash, i;
+    unsigned int i;
     hash_entry_t *he;
 
-    hash = hash_func(key);
-    i = hash % ht->slots;
+    i = hash_func(ht, key) % ht->slots;
 
     if ((he = ht->data[i])) {
         while (he) {
@@ -151,11 +156,7 @@ int hash_delete(hash_t *ht, const void *key) {
     unsigned int index;
     hash_entry_t *he, *prev;
 
-    if (!ht->hash_fn) {
-        index = hash_func(key) % ht->slots;
-    } else {
-        index = ht->hash_fn(key) % ht->slots;
-    }
+    index = hash_func(ht, key) % ht->slots;
 
     if ((he = ht->data[index])) {
         prev = NULL;
@@ -246,7 +247,7 @@ int hash_resize(hash_t *ht) {
         if ((he = tmp[i])) {
             while (he) {
                 next = he->next;
-                h = hash_func(he->key) % ht->slots; /* new hash value */
+                h = hash_func(ht, he->key) % ht->slots; /* new hash value */
                 /* insert into new hash table */
                 he->next = ht->data[h];
                 ht->data[h] = he;

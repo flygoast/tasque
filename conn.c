@@ -285,6 +285,8 @@ static unsigned char which_cmd(conn_t *c) {
 /* --------- private function declares ------------ */
 static void reserve_job(conn_t *c, job_t *j);
 static job_t *next_eligible_job(int64_t now);
+static int bury_job(job_t *j);
+static void enqueue_reserved_jobs(conn_t *c);
 
 static void on_watch(set_t *s, void *arg, size_t pos) {
     tube_t *t = (tube_t *)arg;
@@ -307,8 +309,6 @@ static void conn_reset(conn_t *c) {
     c->reply_sent = 0;
     c->state = STATE_WANTCOMMAND;
 }
-
-
 
 /* Copy up to body_size trailing bytes into the job, then the rest
  * into the cmd buffer. If c->in_job exists, this assume that
@@ -618,10 +618,11 @@ void conn_free(conn_t *c) {
         --tasque_srv.cur_worker_cnt;
     }
     --tasque_srv.cur_conn_cnt;
-//    conn_remove_waiting(c);
-//    if (conn_has_reserved_job(c)) {
-//        enqueue_reserved_jobs(c);
-//    }
+    conn_remove_waiting(c);
+    if (conn_has_reserved_job(c)) {
+        /* TODO */
+        enqueue_reserved_jobs(c);
+    }
 
     set_clear(&c->watch);
     --c->use->using_cnt;
@@ -666,16 +667,17 @@ static void process_queue() {
     }
 }
 
-static void remove_reserved_job(conn_t *c, job_t *j) {
+static int remove_reserved_job(conn_t *c, job_t *j) {
     dlist_node *dn;
     dn = dlist_search_key(&c->reserved_jobs, j);
-    if (!dn) return;
+    if (!dn) return -1;
     dlist_delete_node(&c->reserved_jobs, dn);
 
     --tasque_srv.global_stat.reserved_cnt;
     --j->tube->stats.reserved_cnt;
     j->reserver = NULL;
     c->soonest_job = NULL;
+    return 0;
 }
 
 static int enqueue_job(job_t *j, int64_t delay) {
@@ -702,6 +704,23 @@ static int enqueue_job(job_t *j, int64_t delay) {
     return 0;
 }
 
+static void enqueue_reserved_jobs(conn_t *c) {
+    int ret;
+    job_t *j;
+    while (conn_has_reserved_job(c)) {
+        dlist_node *head = dlist_first(&c->reserved_jobs);
+        j = dlist_node_value(head);
+        dlist_delete_node(&c->reserved_jobs, head);
+        ret = enqueue_job(j, 0);
+        if (ret != 0) {
+            bury_job(j);
+        }
+        --tasque_srv.global_stat.reserved_cnt;
+        --j->tube->stats.reserved_cnt;
+        c->soonest_job = NULL;
+    }
+}
+
 /* There are three reasons this function may be called. We need 
  * to check for all of them.
  *
@@ -713,6 +732,7 @@ static int enqueue_job(job_t *j, int64_t delay) {
 static void conn_timeout(conn_t *c) {
     int ret, should_timeout = 0;
     job_t *j;
+    int64_t now = ustime();
 
     /* Check if the client was trying to reserve a job. */
     if (conn_is_waiting(c) && conn_deadline_soon(c)) {
@@ -723,7 +743,7 @@ static void conn_timeout(conn_t *c) {
      * do this whether or not the client is waiting for a new
      * reservation. */
     while ((j = conn_soonest_reserved_job(c))) {
-        if (j->rec.deadline_at > ustime()) break;
+        if (j->rec.deadline_at > now) break;
 
         /* This job is in the middle of being written out. If we
          * return it to the ready queue, someone might free it
@@ -737,8 +757,8 @@ static void conn_timeout(conn_t *c) {
         ++j->rec.timeout_cnt;
         remove_reserved_job(c, j);
         ret = enqueue_job(j, 0);
-        if (ret < 0) {
-            /* TODO */
+        if (ret != 0) {
+            bury_job(j);
         }
 
         c->tickat = conn_tickat(c);
@@ -762,7 +782,7 @@ static void conn_timeout(conn_t *c) {
 }
 
 /* cron function every 10 ms */
-void conn_tick(void *tickarg, int ev) {
+void conn_cron(void *tickarg, int ev) {
     int64_t now = ustime();
 
     /* process tick event of some connections */
@@ -890,24 +910,18 @@ static job_t *next_eligible_job(int64_t now) {
     return j;
 }
 
+static int bury_job(job_t *j) {
+    if (!dlist_add_node_tail(&j->tube->buried_jobs, j)) {
+        return -1;
+    }
 
-
-//
-//static int bury_job(job_t *j) {
-//    if (!dlist_add_node_head(&j->tube->buried_jobs, j)) {
-//        return -1;
-//    }
-//
-//    ++tasque_srv.global_stat.buried_cnt;
-//    ++j->tube->stat.buried_cnt;
-//    j->rec.state = JOB_BURIED;
-//    j->reserver = NULL;
-//    ++j->rec.bury_cnt;
-//    return 0;
-//}
-
-
-
+    ++tasque_srv.global_stat.buried_cnt;
+    ++j->tube->stats.buried_cnt;
+    j->rec.state = JOB_BURIED;
+    j->reserver = NULL;
+    ++j->rec.bury_cnt;
+    return 0;
+}
 
 static void enqueue_incoming_job(conn_t *c) {
     int ret;
@@ -951,20 +965,18 @@ static void enqueue_incoming_job(conn_t *c) {
 //}
 
 
-
-//static job_t *remove_buried_job(job_t *j) {
-//    dlist_node *dn;
-//    if (!j || j->rec.state != JOB_BURIED) return NULL;
-//    dn = dlist_search_key(&tasque_srv.buried_jobs, j);
-//    if (!dn) return NULL;
-//    dlist_delete_node(&tasque_srv.buried_jobs, dn);
-//
-//    if (j) {
-//        --tasque_srv.global_stat.buried_cnt;
-//        --j->tube->stat.buried_cnt;
-//    }
-//    return j;
-//}
+static job_t *remove_buried_job(tube_t *t) {
+    dlist_node *head = dlist_first(&t->buried_jobs);
+    if (!head) return NULL;
+    job_t *j = dlist_node_value(head);
+    if (!j || j->rec.state != JOB_BURIED) return NULL;
+    dlist_delete_node(&t->buried_jobs, head);
+    if (j) {
+        --tasque_srv.global_stat.buried_cnt;
+        --j->tube->stats.buried_cnt;
+    }
+    return j;
+}
 //
 //static job_t *remove_ready_job(job_t *j) {
 //    dlist_node *dn;
@@ -988,42 +1000,71 @@ static void enqueue_incoming_job(conn_t *c) {
 //    }
 //    return j;
 //}
-//
-//static uint32_t kick_buried_job(tube_t *t) {
-//    int ret;
-//    job_t *j;
-//    int z;
-//
-//    if (!tube_has_buried_job(t)) return 0;
-//    /* TODO */
-//    return ret;
-//}
-//
-//static uint32_t kick_buried_jobs(tube_t *t, uint32_t n) {
-//    uint32_t i = 0;
-//    for (i = 0; (i < n) &&  kick_buried_job(t); ++i) { /* do nothing */ }
-//    return i;
-//}
-//
-//static uint32_t kick_delayed_jobs(tube_t *t, uint32_t n) {
-//    uint32_t i = 0;
-//    for (i = 0; (i < n) &&  kick_delayed_job(t); ++i) { /* do nothing */ }
-//    return i;
-//}
-//
-//static uint32_t kick_jobs(tube_t *t, uint32_t n) {
-//    if (tube_has_buried_job(t)) return 
-//}
+
+static uint32_t kick_delayed_job(tube_t *t) {
+    int ret;
+    job_t *j;
+
+    if (t->delay_jobs.len == 0) return -1;
+    j = heap_remove(&t->delay_jobs, 0);
+    ++j->rec.kick_cnt;
+    ret = enqueue_job(j, 0);
+    if (ret == 0) {
+        return 0;
+    }
+    ret = enqueue_job(j, j->rec.delay);
+    if (ret == 0) {
+        return -1;
+    }
+    bury_job(j);
+    return -1;
+}
+
+static uint32_t kick_buried_job(tube_t *t) {
+    int ret;
+    job_t *j;
+
+    if (!tube_has_buried_job(t)) return 0;
+    j = remove_buried_job(t);
+    ++j->rec.kick_cnt;
+    ret = enqueue_job(j, 0);
+    if (ret != 0) {
+        bury_job(j);
+    }
+    return ret;
+}
+
+static uint32_t kick_buried_jobs(tube_t *t, uint32_t n) {
+    uint32_t i = 0;
+    for (i = 0; (i < n) && !kick_buried_job(t); ++i) { /* nothing */ }
+    return i;
+}
+
+static uint32_t kick_delayed_jobs(tube_t *t, uint32_t n) {
+    uint32_t i = 0;
+    for (i = 0; (i < n) && !kick_delayed_job(t); ++i) { /* nothing */ }
+    return i;
+}
+
+static uint32_t kick_jobs(tube_t *t, uint32_t n) {
+    if (tube_has_buried_job(t)) {
+        return kick_buried_jobs(t, n);
+    } else {
+        return kick_delayed_jobs(t, n);
+    }
+}
 
 static void do_cmd(conn_t *c) {
     unsigned char type;
     int ret, timeout = -1;
     uint32_t pri, body_size;
 //    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
-    char *size_buf, *delay_buf, *ttr_buf, *end_buf;
+    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf;
     int64_t delay, ttr;
-
-//    uint64_t id;
+    job_t *j;
+    long count;
+    uint32_t i;
+    uintptr_t id;
 //    tube_t *t = NULL;
 
     /* NUL-terminate this string so we can use strtol and friends */
@@ -1227,34 +1268,40 @@ static void do_cmd(conn_t *c) {
 //        reply(c, MSG_BURIED, MSG_BURIED_LEN, STATE_SENDWORD);
 //        break;
 //
-//    case OP_BURY:
-//        id = strtoull(c->cmd + CMD_BURY_LEN, &pri_buf, 10);
-//        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
-//
-//        ret = read_pri(&pri, pri_buf, NULL);
-//        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
-//        ++tasque_srv.op_cnt[type];
-//        j = remove_reserved_job(c, job_find(id));
-//
-//        if (!j) {
-//            reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN, STATE_SENDWORD);
-//            return;
-//        }
-//        j->rec.pri = pri;
-//        ret = bury_job(j, 1);
-//        if (ret) return reply_serr(c, MSG_INTERNAL_ERROR);
-//        reply(c, MSG_BURIED, MSG_BURIED_LEN, STATE_SENDWORD);
-//        break;
-//    case OP_KICK:
-//        count = strtoull(c->cmd + CMD_KICK_LEN, &end_buf, 10);
-//        if (end_buf == c->cmd + CMD_KICK_LEN) {
-//            return reply_msg(c, MSG_BAD_FORMAT);
-//        }
-//        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
-//        ++tasque_srv.op_cnt[type];
-//
-//        i = kick_jobs(c->use, count);
-//        return reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
+    case OP_BURY:
+        id = strtoul(c->cmd + CMD_BURY_LEN, &pri_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_pri(&pri, pri_buf, NULL);
+        if (ret != 0) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        j = job_find(id);
+        if (!j) {
+            return reply_msg(c, MSG_NOTFOUND);
+        }
+
+        ret = remove_reserved_job(c, j);
+        if (ret != 0) {
+            return reply_msg(c, MSG_NOTFOUND);
+        }
+        j->rec.pri = pri;
+        ret = bury_job(j);
+        if (ret != 0) return reply_msg(c, MSG_INTERNAL_ERROR);
+        reply_msg(c, MSG_BURIED);
+        break;
+    case OP_KICK:
+        count = strtoul(c->cmd + CMD_KICK_LEN, &end_buf, 10);
+        if (end_buf == c->cmd + CMD_KICK_LEN) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+
+        i = kick_jobs(c->use, count);
+        return reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
+    case OP_QUIT:
+        conn_close(c);
+        break;
     default:
         return reply_msg(c, MSG_UNKNOWN_COMMAND);
     }
