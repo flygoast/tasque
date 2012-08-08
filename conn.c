@@ -7,6 +7,8 @@
 #include <limits.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <inttypes.h>
 #include <netinet/in.h>
 #include "srv.h"
@@ -17,6 +19,8 @@
 #include "tube.h"
 #include "net.h"
 #include "job.h"
+
+#define VERSION                 "0.0.1"
 
 #define INIT_WATCH_NUM  8
 #define min(a, b)       ((a) < (b) ? (a) : (b))
@@ -63,6 +67,7 @@
 #define CMD_RESERVE_LEN             CONSTSTRLEN(CMD_RESERVE)
 #define CMD_RESERVE_TIMEOUT_LEN     CONSTSTRLEN(CMD_RESERVE_TIMEOUT)
 #define CMD_DELETE_LEN              CONSTSTRLEN(CMD_DELETE)
+#define CMD_RELEASE_LEN             CONSTSTRLEN(CMD_RELEASE)
 #define CMD_BURY_LEN                CONSTSTRLEN(CMD_BURY)
 #define CMD_KICK_LEN                CONSTSTRLEN(CMD_KICK)
 #define CMD_TOUCH_LEN               CONSTSTRLEN(CMD_TOUCH)
@@ -183,8 +188,8 @@
     "uptime: %u\n"                              \
     "binlog-oldest-index: %d\n"                 \
     "binlog-current-index: %d\n"                \
-    "binlog-records-migrated: %" PRId64 "\n"    \
-    "binlog-records-written: %" PRId64 "\n"     \
+    "binlog-records-migrated: %d\n"             \
+    "binlog-records-written: %d\n"              \
     "binlog-max-size: %d\n"                     \
     "\r\n"
 
@@ -419,6 +424,99 @@ static void skip_and_reply(conn_t *c, int n, char *line, int len) {
     return;
 }
 
+/* --------------- stats associated functions --------------- */
+static uint32_t get_delayed_job_cnt() {
+    tube_t *t;
+    size_t i;
+    uint32_t count;
+
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        count += t->delay_jobs.len;
+    }
+    return count;
+}
+
+typedef int(*fmt_fn)(char *buf, size_t n, void *data);
+
+static void do_stats(conn_t *c, fmt_fn fmt, void *data) {
+    int ret, stats_len;
+
+    /* first, measure how big a buffer we will need */
+    stats_len = fmt(NULL, 0, data) + 16;
+
+    /* fake job to hold stats data */
+    c->out_job = (job_t *)calloc(sizeof(job_t) + stats_len, 1);
+    if (!c->out_job) {
+        return reply_msg(c, MSG_OUT_OF_MEMORY);
+    }
+    c->out_job->rec.created_at = ustime();
+    c->out_job->rec.body_size = stats_len;
+    /* Mark this job as a copy so it can be appropriately
+     * freed later on */
+    c->out_job->rec.state = JOB_COPY;
+    /* Now actually format the stats data */
+    ret = fmt(c->out_job->body, stats_len, data);
+    /* and set the actual body size */
+    c->out_job->rec.body_size = ret;
+    if (ret > stats_len) return reply_msg(c, MSG_INTERNAL_ERROR);
+    c->out_job_sent = 0;
+    return reply_line(c, STATE_SENDJOB, "OK %d\r\n", ret - 2);
+}
+
+static int fmt_stats(char *buf, size_t n, void *data) {
+    struct rusage ru = {};
+    getrusage(RUSAGE_SELF, &ru); /* don't care if it fails */
+    return snprintf(buf, n, STATS_FMT,
+            tasque_srv.global_stat.urgent_cnt,
+            tasque_srv.ready_cnt,
+            tasque_srv.global_stat.reserved_cnt,
+            get_delayed_job_cnt(),
+            tasque_srv.global_stat.buried_cnt,
+            tasque_srv.op_cnt[OP_PUT],
+            tasque_srv.op_cnt[OP_PEEKJOB],
+            tasque_srv.op_cnt[OP_PEEK_READY],
+            tasque_srv.op_cnt[OP_PEEK_DELAYED],
+            tasque_srv.op_cnt[OP_PEEK_BURIED],
+            tasque_srv.op_cnt[OP_RESERVE],
+            tasque_srv.op_cnt[OP_RESERVE_TIMEOUT],
+            tasque_srv.op_cnt[OP_DELETE],
+            tasque_srv.op_cnt[OP_RELEASE],
+            tasque_srv.op_cnt[OP_USE],
+            tasque_srv.op_cnt[OP_WATCH],
+            tasque_srv.op_cnt[OP_IGNORE],
+            tasque_srv.op_cnt[OP_BURY],
+            tasque_srv.op_cnt[OP_KICK],
+            tasque_srv.op_cnt[OP_TOUCH],
+            tasque_srv.op_cnt[OP_STATS],
+            tasque_srv.op_cnt[OP_JOBSTATS],
+            tasque_srv.op_cnt[OP_STATS_TUBE],
+            tasque_srv.op_cnt[OP_LIST_TUBES],
+            tasque_srv.op_cnt[OP_LIST_TUBE_USED],
+            tasque_srv.op_cnt[OP_LIST_TUBES_WATCHED],
+            tasque_srv.op_cnt[OP_PAUSE_TUBE],
+            tasque_srv.timeout_cnt,
+            tasque_srv.global_stat.total_jobs_cnt,
+            (size_t)JOB_DATA_LIMIT,
+            tasque_srv.tubes.used,
+            tasque_srv.cur_conn_cnt,
+            tasque_srv.cur_producer_cnt,
+            tasque_srv.cur_worker_cnt,
+            tasque_srv.global_stat.waiting_cnt,
+            tasque_srv.tot_conn_cnt,
+            (long)getpid(),
+            VERSION,
+            (int)ru.ru_utime.tv_sec, (int)ru.ru_utime.tv_usec,
+            (int)ru.ru_stime.tv_sec, (int)ru.ru_stime.tv_usec,
+            (unsigned int)((ustime() - tasque_srv.started_at) / 1000000),
+            0,
+            0,
+            0,
+            0,
+            0);
+}
+
+
 #define conn_is_waiting(c)  ((c)->type & CONN_TYPE_WAITING)
 
 static int conn_has_reserved_job(conn_t *c) {
@@ -501,6 +599,15 @@ job_t *conn_soonest_reserved_job(conn_t *c) {
     }
     c->soonest_job = soonest;
     return soonest;
+}
+
+static int touch_job(conn_t *c, job_t *j) {
+    if (j->reserver != c || j->rec.state != JOB_RESERVED) {
+        return -1;
+    }
+    j->rec.deadline_at = ustime() + j->rec.ttr;
+    c->soonest_job = NULL;
+    return 0;
 }
 
 /* the connection should be waked up at some tick */
@@ -1242,40 +1349,37 @@ static void do_cmd(conn_t *c) {
         job_free(j);
         reply_msg(c, MSG_DELETED);
         break;
-//    case OP_RELEASE:
-//        id = strtoull(c->cmd + CMD_RELEASE_LEN, &pri_buf, 10);
-//        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
-//
-//        ret = read_pri(&pri, pri_buf, &delay_buf);
-//        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
-//
-//        ret = read_delay(&delay, delay_buf, NULL);
-//        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
-//        ++tasque.op_cnt[type];
-//
-//        j = remove_reserved_job(c, job_find(id));
-//
-//        if (!j) {
-//            return reply(c, MSG_NOTFOUND, MSG_NOTFOUND_LEN,
-//                    STATE_SENDWORD);
-//        }
-//
-//        j->rec.pri = pri;
-//        j->rec.delay = delay;
-//        ++j->rec.release_cnt;
-//
-//        ret = enqueue_job(j, delay);
-//        if (ret < 0) {
-//            return reply_serr(c, MSG_INTERNAL_ERROR);
-//        }
-//        if (ret == 1) {
-//            return reply(c, MSG_RELEASED, MSG_RELEASED_LEN,
-//                    STATE_SENDWORD);
-//        }
-//        bury_job(j);
-//        reply(c, MSG_BURIED, MSG_BURIED_LEN, STATE_SENDWORD);
-//        break;
-//
+    case OP_RELEASE:
+        id = strtoul(c->cmd + CMD_RELEASE_LEN, &pri_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_pri(&pri, pri_buf, &delay_buf);
+        if (ret) return reply_msg(c, MSG_BAD_FORMAT);
+
+        ret = read_delay(&delay, delay_buf, NULL);
+        if (ret != 0) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+
+        j = job_find(id);
+        if (j) {
+            return reply_msg(c, MSG_NOTFOUND);
+        }
+
+        ret = remove_reserved_job(c, j);
+        if (ret != 0) {
+            return reply_msg(c, MSG_NOTFOUND);
+        }
+
+        j->rec.pri = pri;
+        j->rec.delay = delay;
+        ++j->rec.release_cnt;
+        ret = enqueue_job(j, delay);
+        if (ret < 0) {
+            bury_job(j);
+            return reply_msg(c, MSG_BURIED);
+        }
+        reply_msg(c, MSG_RELEASED);
+        break;
     case OP_BURY:
         id = strtoul(c->cmd + CMD_BURY_LEN, &pri_buf, 10);
         if (errno) return reply_msg(c, MSG_BAD_FORMAT);
@@ -1306,7 +1410,29 @@ static void do_cmd(conn_t *c) {
         ++tasque_srv.op_cnt[type];
 
         i = kick_jobs(c->use, count);
-        return reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
+        reply_line(c, STATE_SENDWORD, "KICKED %u\r\n", i);
+        break;
+    case OP_TOUCH:
+        id = strtoul(c->cmd + CMD_TOUCH_LEN, &end_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        j = job_find(id);
+        if (!j) return reply_msg(c, MSG_NOTFOUND);
+        ret = touch_job(c, j);
+        if (ret < 0) {
+            return reply_msg(c, MSG_NOTFOUND);
+        }
+        reply_msg(c, MSG_TOUCHED);
+        break;
+    case OP_STATS:
+        /* don't allow trailing garbage */
+        if (c->cmd_len != CMD_STATS_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        /* TODO */
+        do_stats(c, fmt_stats, NULL);
+        break;
     case OP_QUIT:
         conn_close(c);
         break;

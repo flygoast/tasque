@@ -20,7 +20,7 @@ typedef struct server_st {
     tube_t      *default_tube;
     int         verbose;
     int         drain_mode;
-    int64_t     stared_at;
+    int64_t     started_at;
 
     int         cur_conn_cnt;
     int         cur_worker_cnt;
