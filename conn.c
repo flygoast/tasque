@@ -194,7 +194,7 @@
     "\r\n"
 
 #define STATS_TUBE_FMT "---\n"                  \
-        "name: %s\n"                            \
+    "name: %s\n"                                \
     "current-jobs-urgent: %u\n"                 \
     "current-jobs-ready: %u\n"                  \
     "current-jobs-reserved: %u\n"               \
@@ -211,7 +211,7 @@
     "\r\n"
 
 #define STATS_JOB_FMT "---\n"                   \
-        "id: %" PRIu64 "\n"                     \
+    "id: %" PRIu64 "\n"                         \
     "tube: %s\n"                                \
     "state: %s\n"                               \
     "pri: %u\n"                                 \
@@ -428,7 +428,7 @@ static void skip_and_reply(conn_t *c, int n, char *line, int len) {
 static uint32_t get_delayed_job_cnt() {
     tube_t *t;
     size_t i;
-    uint32_t count;
+    uint32_t count = 0;
 
     for (i = 0; i < tasque_srv.tubes.used; ++i) {
         t = tasque_srv.tubes.items[i];
@@ -443,7 +443,7 @@ static void do_stats(conn_t *c, fmt_fn fmt, void *data) {
     int ret, stats_len;
 
     /* first, measure how big a buffer we will need */
-    stats_len = fmt(NULL, 0, data) + 16;
+    stats_len = fmt(NULL, 0, data) + 2;
 
     /* fake job to hold stats data */
     c->out_job = (job_t *)calloc(sizeof(job_t) + stats_len, 1);

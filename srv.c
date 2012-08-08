@@ -8,6 +8,7 @@
 #include "srv.h"
 #include "conn.h"
 #include "tube.h"
+#include "times.h"
 #include "net.h"
 
 #define DEFAULT_PORT        8774
@@ -54,6 +55,8 @@ void srv_init() {
     tasque_srv.host = strdup("0.0.0.0");
     tasque_srv.user = NULL;
     tasque_srv.next_job_id = 1;
+
+    tasque_srv.started_at = ustime();
 
     set_init(&tasque_srv.tubes, NULL, NULL);
 
