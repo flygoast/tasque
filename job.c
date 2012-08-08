@@ -34,7 +34,9 @@ job_t *job_create(int pri, int64_t delay, int64_t ttr,
 }
 
 void job_free(job_t *j) {
-    hash_delete(&tasque_srv.all_jobs, (void *)(j->rec.id));
+    if (j->rec.state != JOB_COPY) {
+        hash_delete(&tasque_srv.all_jobs, (void *)(j->rec.id));
+    }
     free(j);
 }
 
@@ -65,7 +67,7 @@ int job_delay_less(void *ax, void *bx) {
 }
 
 job_t *job_copy(job_t *j) {
-    job_t *aj = (job_t *)malloc(sizeof(aj));
+    job_t *aj = (job_t *)malloc(sizeof(*aj) + j->rec.body_size);
     if (!aj) {
         return NULL;
     }
