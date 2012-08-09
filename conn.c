@@ -574,16 +574,15 @@ static int fmt_stats_tube(char *buf, size_t n, void *at) {
             time_left);
 }
 
-
-static void do_list_tubes(conn_t *c) {
+static void do_list_tubes(conn_t *c, set_t *tubes) {
     char *buf;
     tube_t *t;
     size_t i, resp_z;
 
     /* first, measure how big a buffer we will need */
     resp_z = 6; /* initial "---\n" and final "\r\n" */
-    for (i = 0; i < tasque_srv.tubes.used; ++i) {
-        t = tasque_srv.tubes.items[i];
+    for (i = 0; i < tubes->used; ++i) {
+        t = tubes->items[i];
         resp_z += 3 + strlen(t->name);  /* including "- " and "\n" */
     }
 
@@ -593,12 +592,23 @@ static void do_list_tubes(conn_t *c) {
         return reply_msg(c, MSG_OUT_OF_MEMORY);
     }
     c->out_job->rec.created_at = ustime();
-    c->out_job->rec.body_size = resp_z + 2;
+    c->out_job->rec.body_size = resp_z;
 
     /* Mark this job as a copy so it can be appropriately
      * freed later on */
     c->out_job->rec.state = JOB_COPY;
-    /* TODO */
+
+    /* now actually format the response */
+    buf = c->out_job->body;
+    buf += snprintf(buf, 5, "---\n");
+    for (i = 0; i < tubes->used; ++i) {
+        t = tubes->items[i];
+        buf += snprintf(buf, 4 + strlen(t->name), "- %s\n", t->name);
+    }
+    buf[0] = '\r';
+    buf[1] = '\n';
+    c->out_job_sent = 0;
+    return reply_line(c, STATE_SENDJOB, "OK %d\r\n", resp_z - 2);
 }
 
 #define conn_is_waiting(c)  ((c)->type & CONN_TYPE_WAITING)
@@ -1535,7 +1545,36 @@ static void do_cmd(conn_t *c) {
             return reply_msg(c, MSG_BAD_FORMAT);
         }
         ++tasque_srv.op_cnt[type];
-        do_list_tubes(c);
+        do_list_tubes(c, &tasque_srv.tubes);
+        break;
+    case OP_LIST_TUBE_USED:
+        /* don't allow trailing garbage */
+        if (c->cmd_len != CMD_LIST_TUBE_USED_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        reply_line(c, STATE_SENDWORD, "USING %s\r\n", c->use->name);
+        break;
+    case OP_LIST_TUBES_WATCHED:
+        /* don't allow trailing garbage */
+        if (c->cmd_len != CMD_LIST_TUBES_WATCHED_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        do_list_tubes(c, &c->watch);
+        break;
+    case OP_USE:
+        name = c->cmd + CMD_USE_LEN;
+        if (!name_is_ok(name, 200)) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        t = tube_find_or_create(name);
+        if (!t) return reply_msg(c, MSG_OUT_OF_MEMORY);
+        tube_iref(t);
+        --c->use->using_cnt;
+        tube_dref(c->use);
+        c->use = t;
+        ++c->use->using_cnt;
+        reply_line(c, STATE_SENDWORD, "USING %s\r\n", c->use->name);
         break;
     case OP_QUIT:
         conn_close(c);
