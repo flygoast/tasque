@@ -72,7 +72,7 @@
 #define CMD_KICK_LEN                CONSTSTRLEN(CMD_KICK)
 #define CMD_TOUCH_LEN               CONSTSTRLEN(CMD_TOUCH)
 #define CMD_STATS_LEN               CONSTSTRLEN(CMD_STATS)
-#define CMD_JOBSTATS_LEN            CONSTSTRLEN(CMD_JOBSTACKS)
+#define CMD_JOBSTATS_LEN            CONSTSTRLEN(CMD_JOBSTATS)
 #define CMD_USE_LEN                 CONSTSTRLEN(CMD_USE)
 #define CMD_WATCH_LEN               CONSTSTRLEN(CMD_WATCH)
 #define CMD_IGNORE_LEN              CONSTSTRLEN(CMD_IGNORE)
@@ -315,6 +315,12 @@ static void conn_reset(conn_t *c) {
     c->state = STATE_WANTCOMMAND;
 }
 
+static int name_is_ok(char *name, size_t max) {
+    size_t len = strlen(name);
+    return len > 0 && len <= max &&
+        strspn(name, NAME_CHARS) == len && name[0] != '-';
+}
+
 /* Copy up to body_size trailing bytes into the job, then the rest
  * into the cmd buffer. If c->in_job exists, this assume that
  * c->in_job->body is empty.
@@ -516,6 +522,84 @@ static int fmt_stats(char *buf, size_t n, void *data) {
             0);
 }
 
+static int fmt_job_stats(char *buf, size_t n, void *aj) {
+    int64_t t;
+    int64_t time_left = 0;
+    int file = 0;
+    job_t *j = (job_t *)aj;
+
+    t = ustime();
+    if (j->rec.state == JOB_RESERVED || j->rec.state == JOB_DELAYED) {
+        time_left = (j->rec.deadline_at - t) / 1000000;
+    }
+
+    return snprintf(buf, n, STATS_JOB_FMT,
+            j->rec.id,
+            j->tube->name,
+            job_state(j),
+            j->rec.pri,
+            (t - j->rec.created_at) / 1000000,
+            j->rec.delay / 1000000,
+            j->rec.ttr / 1000000,
+            time_left,
+            file,
+            j->rec.reserve_cnt,
+            j->rec.timeout_cnt,
+            j->rec.release_cnt,
+            j->rec.bury_cnt,
+            j->rec.kick_cnt);
+}
+
+static int fmt_stats_tube(char *buf, size_t n, void *at) {
+    tube_t *t = (tube_t *)at;
+    int64_t time_left = 0;
+    if (t->pause > 0) {
+        time_left = (t->deadline_at - ustime()) / 1000000;
+    }
+
+    return snprintf(buf, n, STATS_TUBE_FMT,
+            t->name,
+            t->stats.urgent_cnt,
+            t->ready_jobs.len,
+            t->stats.reserved_cnt,
+            t->delay_jobs.len,
+            t->stats.buried_cnt,
+            t->stats.total_jobs_cnt,
+            t->using_cnt,
+            t->watching_cnt,
+            t->stats.waiting_cnt,
+            t->stats.total_delete_cnt,
+            t->stats.pause_cnt,
+            t->pause / 1000000,
+            time_left);
+}
+
+
+static void do_list_tubes(conn_t *c) {
+    char *buf;
+    tube_t *t;
+    size_t i, resp_z;
+
+    /* first, measure how big a buffer we will need */
+    resp_z = 6; /* initial "---\n" and final "\r\n" */
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        resp_z += 3 + strlen(t->name);  /* including "- " and "\n" */
+    }
+
+    /* fake job to hold stats data */
+    c->out_job = (job_t *)calloc(sizeof(job_t) + resp_z, 1);
+    if (!c->out_job) {
+        return reply_msg(c, MSG_OUT_OF_MEMORY);
+    }
+    c->out_job->rec.created_at = ustime();
+    c->out_job->rec.body_size = resp_z + 2;
+
+    /* Mark this job as a copy so it can be appropriately
+     * freed later on */
+    c->out_job->rec.state = JOB_COPY;
+    /* TODO */
+}
 
 #define conn_is_waiting(c)  ((c)->type & CONN_TYPE_WAITING)
 
@@ -1158,14 +1242,13 @@ static void do_cmd(conn_t *c) {
     unsigned char type;
     int ret, timeout = -1;
     uint32_t pri, body_size;
-//    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
-    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf;
+    char *size_buf, *delay_buf, *ttr_buf, *pri_buf, *end_buf, *name;
     int64_t delay, ttr;
     job_t *j = NULL;
     long count;
     uint32_t i;
     uintptr_t id;
-//    tube_t *t = NULL;
+    tube_t *t = NULL;
 
     /* NUL-terminate this string so we can use strtol and friends */
     c->cmd[c->cmd_len - 2] = '\0';
@@ -1361,10 +1444,7 @@ static void do_cmd(conn_t *c) {
         ++tasque_srv.op_cnt[type];
 
         j = job_find(id);
-        if (j) {
-            return reply_msg(c, MSG_NOTFOUND);
-        }
-
+        if (!j) return reply_msg(c, MSG_NOTFOUND);
         ret = remove_reserved_job(c, j);
         if (ret != 0) {
             return reply_msg(c, MSG_NOTFOUND);
@@ -1430,8 +1510,32 @@ static void do_cmd(conn_t *c) {
             return reply_msg(c, MSG_BAD_FORMAT);
         }
         ++tasque_srv.op_cnt[type];
-        /* TODO */
         do_stats(c, fmt_stats, NULL);
+        break;
+    case OP_JOBSTATS:
+        id = strtoul(c->cmd + CMD_JOBSTATS_LEN, &end_buf, 10);
+        if (errno) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        j = job_find(id);
+        if (!j) return reply_msg(c, MSG_NOTFOUND);
+        if (!j->tube) return reply_msg(c, MSG_INTERNAL_ERROR);
+        do_stats(c, fmt_job_stats, (void *)j);
+        break;
+    case OP_STATS_TUBE:
+        name = c->cmd + CMD_STATS_TUBE_LEN;
+        if (!name_is_ok(name, 200)) return reply_msg(c, MSG_BAD_FORMAT);
+        ++tasque_srv.op_cnt[type];
+        t = tube_find(name);
+        if (!t) return reply_msg(c, MSG_NOTFOUND);
+        do_stats(c, fmt_stats_tube, (void *)t);
+        break;
+    case OP_LIST_TUBES:
+        /* don't allow trailing garbage */
+        if (c->cmd_len != CMD_LIST_TUBES_LEN + 2) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        do_list_tubes(c);
         break;
     case OP_QUIT:
         conn_close(c);
