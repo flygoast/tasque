@@ -1533,7 +1533,9 @@ static void do_cmd(conn_t *c) {
         break;
     case OP_STATS_TUBE:
         name = c->cmd + CMD_STATS_TUBE_LEN;
-        if (!name_is_ok(name, 200)) return reply_msg(c, MSG_BAD_FORMAT);
+        if (!name_is_ok(name, MAX_TUBE_NAME_LEN - 1)) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
         ++tasque_srv.op_cnt[type];
         t = tube_find(name);
         if (!t) return reply_msg(c, MSG_NOTFOUND);
@@ -1565,7 +1567,9 @@ static void do_cmd(conn_t *c) {
         break;
     case OP_USE:
         name = c->cmd + CMD_USE_LEN;
-        if (!name_is_ok(name, 200)) return reply_msg(c, MSG_BAD_FORMAT);
+        if (!name_is_ok(name, MAX_TUBE_NAME_LEN - 1)) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
         ++tasque_srv.op_cnt[type];
         t = tube_find_or_create(name);
         if (!t) return reply_msg(c, MSG_OUT_OF_MEMORY);
@@ -1575,6 +1579,38 @@ static void do_cmd(conn_t *c) {
         c->use = t;
         ++c->use->using_cnt;
         reply_line(c, STATE_SENDWORD, "USING %s\r\n", c->use->name);
+        break;
+    case OP_WATCH:
+        name = c->cmd + CMD_WATCH_LEN;
+        if (!name_is_ok(name, MAX_TUBE_NAME_LEN - 1)) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        t = tube_find_or_create(name);
+        if (!t) return reply_msg(c, MSG_OUT_OF_MEMORY);
+        if (!set_contains(&c->watch, t)) {
+            if (set_append(&c->watch, t) < 0) {
+                return reply_msg(c, MSG_OUT_OF_MEMORY);
+            }
+        }
+        reply_line(c, STATE_SENDWORD, "WATCHING %d\r\n", c->watch.used);
+        break;
+    case OP_IGNORE:
+        name = c->cmd + CMD_IGNORE_LEN;
+        if (!name_is_ok(name, MAX_TUBE_NAME_LEN - 1)) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        t = NULL;
+        for (i = 0; i < c->watch.used; ++i) {
+            t = c->watch.items[i];
+            if (strncmp(t->name, name, MAX_TUBE_NAME_LEN) == 0) break;
+            t = NULL;
+        }
+
+        if (t && c->watch.used < 2) return reply_msg(c, MSG_NOT_IGNORED);
+        if (t) set_remove(&c->watch, t); /* maybe free t if refcount=0 */
+        reply_line(c, STATE_SENDWORD, "WATCHING %d\r\n", c->watch.used);
         break;
     case OP_QUIT:
         conn_close(c);

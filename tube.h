@@ -7,7 +7,7 @@
 #include "heap.h"
 #include "tube.h"
 
-#define MAX_TUBE_NAME_LEN       256
+#define MAX_TUBE_NAME_LEN       201
 
 #define TUBE_ASSIGN(a, b)   (tube_dref(a), (a) = (b), tube_iref(a))
 
