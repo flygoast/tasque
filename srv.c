@@ -124,5 +124,4 @@ void srv_destroy() {
     heap_destroy(&tasque_srv.conns);
     set_destroy(&tasque_srv.tubes);
     hash_destroy(&tasque_srv.all_jobs);
-    dlist_destroy(&tasque_srv.dirty_conns);
 }

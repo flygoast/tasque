@@ -211,7 +211,7 @@
     "\r\n"
 
 #define STATS_JOB_FMT "---\n"                   \
-    "id: %" PRIu64 "\n"                         \
+    "id: %lu\n"                                 \
     "tube: %s\n"                                \
     "state: %s\n"                               \
     "pri: %u\n"                                 \
@@ -351,13 +351,6 @@ static void fill_extra_data(conn_t *c) {
     c->cmd_len = 0; /* we no longer know the length of the new command */
 }
 
-
-//void conn_rm_dirty(conn_t *c) {
-//    dlist_node *dn;
-//    dn = dlist_search_key(&tasque_srv.dirty_conns, c);
-//    if (!dn) return;
-//    dlist_delete_node(&tasque_srv.dirty_conns, dn);
-//}
 
 /* -------------- Reply association functions ---------------- */
 #define reply_msg(c, m) \
@@ -534,7 +527,7 @@ static int fmt_job_stats(char *buf, size_t n, void *aj) {
     }
 
     return snprintf(buf, n, STATS_JOB_FMT,
-            j->rec.id,
+            (unsigned long)j->rec.id,
             j->tube->name,
             job_state(j),
             j->rec.pri,
@@ -670,7 +663,6 @@ static void wait_for_job(conn_t *c, int timeout) {
     if (c->tickat) {
         heap_insert(&tasque_srv.conns, c);
     }
-    assert(dlist_add_node_head(&tasque_srv.dirty_conns, c) != NULL);
 }
 
 /* return the reserved job with the earlist deadline,
@@ -807,6 +799,7 @@ void conn_free(conn_t *c) {
     }
 
     if (c->in_job) job_free(c->in_job);
+    /* was this a peek or stats command? */
     if (c->out_job && !c->out_job->rec.id) job_free(c->out_job);
 
     c->in_job = c->out_job = NULL;
@@ -821,7 +814,6 @@ void conn_free(conn_t *c) {
     --tasque_srv.cur_conn_cnt;
     conn_remove_waiting(c);
     if (conn_has_reserved_job(c)) {
-        /* TODO */
         enqueue_reserved_jobs(c);
     }
 
@@ -834,8 +826,6 @@ void conn_free(conn_t *c) {
         heap_remove(&tasque_srv.conns, c->tickpos);
         c->tickpos = -1;
     }
-
-    /* DELETE dirty */
 
     set_destroy(&c->watch);
     dlist_destroy(&c->reserved_jobs);
@@ -982,9 +972,48 @@ static void conn_timeout(conn_t *c) {
     }
 }
 
+static job_t *soonest_delay_job() {
+    int i;
+    tube_t *t;
+    job_t *j = NULL, *nj;
+
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        if (t->delay_jobs.len == 0) {
+            continue;
+        }
+        nj = t->delay_jobs.data[0];
+        if (!j || nj->rec.deadline_at < j->rec.deadline_at) {
+            j = nj;
+        }
+    }
+    return j;
+}
+
 /* cron function every 10 ms */
 void conn_cron(void *tickarg, int ev) {
     int64_t now = ustime();
+    job_t *j;
+    int ret;
+    int i;
+    tube_t *t;
+
+    while ((j = soonest_delay_job())) {
+        if (j->rec.deadline_at > now) break;
+        heap_remove(&j->tube->delay_jobs, j->heap_index);
+        ret = enqueue_job(j, 0);
+        if (ret < 0) {
+            bury_job(j);
+        }
+    }
+
+    for (i = 0; i < tasque_srv.tubes.used; ++i) {
+        t = tasque_srv.tubes.items[i];
+        if (t->pause && t->deadline_at <= now) {
+            t->pause = 0;
+            process_queue();
+        }
+    }
 
     /* process tick event of some connections */
     while (tasque_srv.conns.len) {
@@ -1061,16 +1090,16 @@ static int read_ttr(int64_t *ttr, const char *buf, char **end) {
 
 /* Read a tube name from the given buffer moving the buffer to
  * the name start */
-//static int read_tube_name(char **tubename, char *buf, char **end) {
-//    size_t len;
-//
-//    while (buf[0] == ' ') ++buf;
-//    len = strspn(buf, NAME_CHARS);
-//    if (len == 0) return -1;
-//    if (tubename) *tubename = buf;
-//    if (end) *end = buf + len;
-//    return 0;
-//}
+static int read_tube_name(char **tubename, char *buf, char **end) {
+    size_t len;
+
+    while (buf[0] == ' ') ++buf;
+    len = strspn(buf, NAME_CHARS);
+    if (len == 0) return -1;
+    if (tubename) *tubename = buf;
+    if (end) *end = buf + len;
+    return 0;
+}
 
 static void reserve_job(conn_t *c, job_t *j) {
     j->rec.deadline_at = ustime() + j->rec.ttr;
@@ -1160,17 +1189,17 @@ static void enqueue_incoming_job(conn_t *c) {
     return reply_line(c, STATE_SENDWORD, MSG_INSERTED_FMT,j->rec.id);
 }
 
-static int remove_buried_job(tube_t *t) {
+static job_t *remove_buried_job(tube_t *t) {
     dlist_node *head = dlist_first(&t->buried_jobs);
-    if (!head) return -1;
+    if (!head) return NULL;
     job_t *j = dlist_node_value(head);
-    if (!j || j->rec.state != JOB_BURIED) return -1;
+    if (!j || j->rec.state != JOB_BURIED) return NULL;
     dlist_delete_node(&t->buried_jobs, head);
     if (j) {
         --tasque_srv.global_stat.buried_cnt;
         --j->tube->stats.buried_cnt;
     }
-    return 0;
+    return j;
 }
 
 static int remove_ready_job(job_t *j) {
@@ -1219,7 +1248,10 @@ static uint32_t kick_buried_job(tube_t *t) {
     job_t *j;
 
     if (!tube_has_buried_job(t)) return 0;
-    remove_buried_job(t);
+    j = remove_buried_job(t);
+    if (!j) {
+        return -1;
+    }
     ++j->rec.kick_cnt;
     ret = enqueue_job(j, 0);
     if (ret != 0) {
@@ -1428,8 +1460,10 @@ static void do_cmd(conn_t *c) {
 
         if ((ret = remove_reserved_job(c, j)) != 0) {
             if ((ret = remove_ready_job(j)) != 0) {
-                if ((ret = remove_buried_job(j->tube)) == 0) {
+                if ((remove_buried_job(j->tube)) == NULL) {
                     ret = remove_delayed_job(j);
+                } else {
+                    ret = 0;
                 }
             }
         }
@@ -1589,6 +1623,7 @@ static void do_cmd(conn_t *c) {
         t = tube_find_or_create(name);
         if (!t) return reply_msg(c, MSG_OUT_OF_MEMORY);
         if (!set_contains(&c->watch, t)) {
+            /* ref count changed by on_watch() or on_ignore(). */
             if (set_append(&c->watch, t) < 0) {
                 return reply_msg(c, MSG_OUT_OF_MEMORY);
             }
@@ -1614,6 +1649,30 @@ static void do_cmd(conn_t *c) {
         break;
     case OP_QUIT:
         conn_close(c);
+        break;
+    case OP_PAUSE_TUBE:
+        ret = read_tube_name(&name, c->cmd + CMD_PAUSE_TUBE_LEN, 
+                &delay_buf);
+        if (ret < 0) {
+            return reply_msg(c, MSG_BAD_FORMAT);
+        }
+        ++tasque_srv.op_cnt[type];
+        ret = read_delay(&delay, delay_buf, NULL);
+        if (ret < 0) return reply_msg(c, MSG_BAD_FORMAT);
+        *delay_buf = '\0';
+        t = tube_find(name);
+        if (!t) return reply_msg(c, MSG_NOTFOUND);
+
+        /* always pause for a positive amount of time, to make sure
+         * the waiting clients wake up when the deadline arrives. */
+        if (delay == 0) {
+            delay = 1;
+        }
+        t->deadline_at = ustime() + delay;
+        t->pause = delay;
+        ++t->stats.pause_cnt;
+
+        reply_line(c, STATE_SENDWORD, "PAUSED\r\n");
         break;
     default:
         return reply_msg(c, MSG_UNKNOWN_COMMAND);

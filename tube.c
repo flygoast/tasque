@@ -52,8 +52,7 @@ void tube_dref(tube_t *t) {
 
     --t->refs;
     if (t->refs < 1) {
-        /* TODO */
-        tube_free(t);
+        tube_free_and_remove(t);
     }
 }
 
@@ -92,8 +91,8 @@ tube_t *tube_make_and_insert(const char *name) {
 }
 
 void tube_free_and_remove(tube_t *t) {
-    tube_free(t);
     set_remove(&tasque_srv.tubes, t);
+    tube_free(t);
 }
 
 tube_t *tube_find_or_create(const char *name) {

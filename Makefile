@@ -1,10 +1,11 @@
-PREFIX=/usr/local
+PREFIX=/usr/local/tasque
 BINDIR=$(PREFIX)/bin
 CFLAGS=-Wall -Werror -g
 LDFLAGS=
 OS=$(shell uname -s | tr A-Z a-z)
 INSTALL=install
 TAR=tar
+
 TARG=tasque
 MOFILE=main.o
 OFILES=\
