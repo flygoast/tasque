@@ -22,6 +22,5 @@ if [ "x$TAG" = "x" ]; then
     TAG="0.0"
 fi
 FULL_VERSION="$TAG.$VER"
-echo $FULL_VERSION
 cat version.h.template | sed "s/\$GIT_VERSION/$FULL_VERSION/g" > version.h
 echo "Generated version.h"
