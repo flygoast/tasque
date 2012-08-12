@@ -9,15 +9,19 @@ if [ $LOCALVER -gt 1 ]; then
         VER="$VER+$(($LOCALVER-$VER))"
     fi
 
-    if git status | grep -q "modified:"; then
+    if ! git diff --quiet HEAD; then
         VER="$VER"M
     fi
     VER="$VER $(git rev-list HEAD -n 1 | cut -c 1-7)"
 else
-    VER="x"
+    VER="0"
 fi
 
-TAG=`git tag | head -n1`
+TAG=`git describe 2>/dev/null`
+if [ "x$TAG" = "x" ]; then
+    TAG="0.0"
+fi
 FULL_VERSION="$TAG.$VER"
+echo $FULL_VERSION
 cat version.h.template | sed "s/\$GIT_VERSION/$FULL_VERSION/g" > version.h
-echo "Generate version.h"
+echo "Generated version.h"
