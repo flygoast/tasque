@@ -1,13 +1,13 @@
-PREFIX=/usr/local/tasque
+PREFIX=/usr/local/
 BINDIR=$(PREFIX)/bin
 CFLAGS=-Wall -Werror -g
 LDFLAGS=
 OS=$(shell uname -s | tr A-Z a-z)
 INSTALL=install
-TAR=tar
 
 TARG=tasque
 MOFILE=main.o
+VERS=version.h
 OFILES=\
 	conn.o\
 	heap.o\
@@ -21,8 +21,11 @@ OFILES=\
 	hash.o\
 	dlist.o
 
-all: $(TARG)
+all: $(VERS) $(TARG)
 .PHONY: all
+
+$(VERS):
+	sh version.h.sh
 
 $(TARG): $(OFILES) $(MOFILE)
 	$(LINK.o) -o $@ $^ $(LDLIBS)
@@ -41,5 +44,5 @@ CLEANFILES:=$(CLEANFILES) $(TARG)
 $(OFILES) $(MOFILE): $(HFILES)
 
 clean:
-	rm -f *.o $(CLEANFILES)
+	rm -f *.o $(CLEANFILES) version.h
 .PHONY: clean
