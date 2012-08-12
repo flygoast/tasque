@@ -55,7 +55,7 @@ void srv_init() {
     tasque_srv.host = strdup("0.0.0.0");
     tasque_srv.user = NULL;
     tasque_srv.next_job_id = 1;
-
+    tasque_srv.job_data_size_limit = DEFAULT_JOB_DATA_SIZE_LIMIT;
     tasque_srv.started_at = ustime();
 
     set_init(&tasque_srv.tubes, NULL, NULL);

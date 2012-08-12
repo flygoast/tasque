@@ -29,6 +29,7 @@ typedef struct server_st {
 
     uintptr_t   next_job_id;
     int         ready_cnt;
+    int64_t     job_data_size_limit;
 
     stats_t     global_stat;
     uint64_t    op_cnt[TOTAL_OPS];

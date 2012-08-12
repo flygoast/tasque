@@ -19,15 +19,14 @@
 #include "tube.h"
 #include "net.h"
 #include "job.h"
+#include "version.h"
 
-#define VERSION                 "0.0.1"
 
 #define INIT_WATCH_NUM  8
 #define min(a, b)       ((a) < (b) ? (a) : (b))
 
 #define SAFETY_MARGIN           1000000         /* 1 second */
 #define URGENT_THRESHOLD        1024
-#define JOB_DATA_LIMIT          ((1 << 16) - 1)
 
 #define NAME_CHARS  \
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"    \
@@ -496,7 +495,7 @@ static int fmt_stats(char *buf, size_t n, void *data) {
             tasque_srv.op_cnt[OP_PAUSE_TUBE],
             tasque_srv.timeout_cnt,
             tasque_srv.global_stat.total_jobs_cnt,
-            (size_t)JOB_DATA_LIMIT,
+            (size_t)tasque_srv.job_data_size_limit,
             tasque_srv.tubes.used,
             tasque_srv.cur_conn_cnt,
             tasque_srv.cur_producer_cnt,
@@ -504,7 +503,7 @@ static int fmt_stats(char *buf, size_t n, void *data) {
             tasque_srv.global_stat.waiting_cnt,
             tasque_srv.tot_conn_cnt,
             (long)getpid(),
-            VERSION,
+            TASQUE_VERSION,
             (int)ru.ru_utime.tv_sec, (int)ru.ru_utime.tv_usec,
             (int)ru.ru_stime.tv_sec, (int)ru.ru_stime.tv_usec,
             (unsigned int)((ustime() - tasque_srv.started_at) / 1000000),
@@ -1322,7 +1321,7 @@ static void do_cmd(conn_t *c) {
 
         ++tasque_srv.op_cnt[type];
 
-        if (body_size > JOB_DATA_LIMIT) {
+        if (body_size > tasque_srv.job_data_size_limit) {
             /* throw away the job body and respond with JOB_TOO_BIG */
             skip_and_reply_msg(c, body_size + 2, MSG_JOB_TOO_BIG);
             return;

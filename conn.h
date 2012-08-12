@@ -8,6 +8,8 @@
 
 #define LINE_BUF_SIZE   208 
 
+#define DEFAULT_JOB_DATA_SIZE_LIMIT     ((1 << 16) - 1)
+
 /* CONN_TYPE_* are bit masks */
 #define CONN_TYPE_PRODUCER  0x1
 #define CONN_TYPE_WORKER    0x2
