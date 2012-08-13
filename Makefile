@@ -44,5 +44,5 @@ CLEANFILES:=$(CLEANFILES) $(TARG)
 $(OFILES) $(MOFILE): $(HFILES)
 
 clean:
-	rm -f *.o $(CLEANFILES) version.h
+	rm -f *.o $(CLEANFILES) $(VERS)
 .PHONY: clean
